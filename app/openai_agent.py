@@ -575,6 +575,24 @@ async def add_message_to_thread(thread_id: str, content: str):
         logger.error(f"[HISTORY_IMPORT] An unexpected error occurred while adding message to thread {thread_id}: {e}")
         return False
 
+async def get_thread_messages(thread_id: str, limit: int = 20) -> list:
+    """Retrieves the most recent messages from a given OpenAI thread."""
+    if not client:
+        logger.error("[CONTEXT] OpenAI client not initialized.")
+        return []
+    try:
+        logger.info(f"[CONTEXT] Fetching messages for thread_id: {thread_id}")
+        messages = await client.beta.threads.messages.list(
+            thread_id=thread_id,
+            limit=limit,
+            order="desc"  # Fetch most recent first
+        )
+        logger.info(f"[CONTEXT] Retrieved {len(messages.data)} messages from OpenAI thread.")
+        return messages.data
+    except Exception as e:
+        logger.error(f"[CONTEXT] Failed to retrieve messages for thread {thread_id}: {e}")
+        return []
+
 def format_location_as_text(latitude: float, longitude: float, name: str, address: str) -> str:
     """Formats location data into a user-friendly text message with a Google Maps link."""
     maps_url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
@@ -689,7 +707,6 @@ async def send_bungalow_pictures(
             return f"Tuve un problema al enviar una de las fotos. Por favor, inténtalo de nuevo."
 
     return f"He enviado {len(pictures)} foto(s) de {bungalow_type}. ¡Espero que te gusten!"
-
 
 async def send_public_areas_pictures(
     phone_number: Optional[str] = None,

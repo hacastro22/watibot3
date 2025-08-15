@@ -25,6 +25,7 @@ import httpx
 from app import config
 import json
 import os
+from . import thread_store, openai_agent
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -173,59 +174,42 @@ async def _get_openai_thread_id(wa_id: str) -> Optional[str]:
 
 async def _get_full_conversation_context(wa_id: str) -> str:
     """
-    Get the complete conversation thread for intelligent accommodation classification.
-    
+    Get the complete conversation thread from the OpenAI Assistant thread.
+
     Returns:
         str: Complete conversation history formatted for AI classification
     """
     try:
-        # Try to get OpenAI thread history first
-        thread_id = await _get_openai_thread_id(wa_id)
-        if thread_id:
-            # This would require OpenAI API integration to get thread messages
-            # For now, we'll use a simpler database-based approach
-            logger.info(f"[CONTEXT] Found thread_id {thread_id} for {wa_id}")
-        
-        # Get conversation history from database or logs
-        conn = get_db_connection()
-        if not conn:
-            return "No conversation context available - database connection failed"
-            
-        cursor = conn.cursor()
-        
-        # Get recent conversation messages (adjust table/column names as needed)
-        query = """
-            SELECT message_text, sender, timestamp 
-            FROM conversation_history 
-            WHERE wa_id = %s 
-            ORDER BY timestamp DESC 
-            LIMIT 20
-        """
-        
-        cursor.execute(query, (wa_id,))
-        messages = cursor.fetchall()
-        
+        thread_info = thread_store.get_thread_id(wa_id)
+        if not thread_info or not thread_info.get('thread_id'):
+            logger.warning(f"[CONTEXT] No OpenAI thread_id found for {wa_id}")
+            return "No conversation history found"
+
+        thread_id = thread_info['thread_id']
+        messages = await openai_agent.get_thread_messages(thread_id, limit=20)
+
         if not messages:
-            return "No conversation history found in database"
-        
-        # Format conversation for context
+            logger.warning(f"[CONTEXT] No messages found in OpenAI thread {thread_id} for {wa_id}")
+            return "No conversation history found"
+
         context_lines = []
-        for msg_text, sender, timestamp in reversed(messages):  # Reverse to chronological order
-            role = "CUSTOMER" if sender == "customer" else "ASSISTANT"
-            context_lines.append(f"{role}: {msg_text}")
+        # Messages are descending, so reverse to get chronological order
+        for msg in reversed(messages):
+            role = "CUSTOMER" if msg.role == "user" else "ASSISTANT"
+            # content is a list, iterate through it
+            for content_item in msg.content:
+                if content_item.type == "text":
+                    context_lines.append(f"{role}: {content_item.text.value}")
         
         conversation_context = "\n".join(context_lines)
-        logger.info(f"[CONTEXT] Retrieved {len(messages)} messages for {wa_id}")
+        logger.info(f"[CONTEXT] Retrieved {len(context_lines)} message lines for {wa_id} from thread {thread_id}")
         
         return conversation_context
-        
+
     except Exception as e:
-        logger.warning(f"Could not get full conversation context for {wa_id}: {e}")
-        # Fallback: return basic context indicating no history available
+        logger.warning(f"Could not get full conversation context for {wa_id} from OpenAI: {e}")
         return f"No conversation context available due to error: {str(e)}"
-    finally:
-        if conn and conn.is_connected():
-            conn.close()
+
 
 async def _classify_accommodation_with_openai(prompt: str) -> str:
     """
@@ -848,7 +832,7 @@ def _select_room(available_rooms: dict, bungalow_type: str, package_type: str) -
     
     if normalization_result["success"]:
         normalized_bungalow_type = normalization_result["type"]
-        logger.info(f"[ROOM_DEBUG] Normalized bungalow type: '{bungalow_type}' -> '{normalized_bungalow_type}'")
+        logger.info(f"[ROOM_DEBUG] Normalized '{bungalow_type}' to '{normalized_bungalow_type}'")
     else:
         # If normalization fails in room selection, use original input as fallback
         # This should be rare since room selection happens after booking type is determined
@@ -1143,7 +1127,6 @@ async def _make_booking_api_call(
         normalization_result = _normalize_bungalow_type(bungalow_type)
         
         if normalization_result["success"]:
-            # Normalization succeeded - use normalized type
             normalized_type = normalization_result["type"]
             logger.info(f"[ACCOMMODATION_DEBUG] Normalized '{bungalow_type}' to '{normalized_type}'")
             
