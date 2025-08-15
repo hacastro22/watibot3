@@ -957,7 +957,23 @@ async def get_openai_response(
                 logger.exception("Failed to create a new thread.")
                 return f"(Error: Could not create a new thread: {e})", None
 
-        # 2. Add user message to the thread
+        # 2. Cancel any active runs BEFORE adding message to prevent conflicts
+        try:
+            existing_runs_resp = await client.get(f"{OPENAI_API_BASE}/threads/{thread_id}/runs", headers=headers)
+            existing_runs_resp.raise_for_status()
+            cancelled_runs = []
+            for run in existing_runs_resp.json().get("data", []):
+                if run['status'] in ['queued', 'in_progress', 'requires_action']:
+                    logger.warning(f"[PRE-MSG] Cancelling active run {run['id']} with status {run['status']} before adding message.")
+                    cancel_url = f"{OPENAI_API_BASE}/threads/{thread_id}/runs/{run['id']}/cancel"
+                    await client.post(cancel_url, headers=headers)
+                    cancelled_runs.append(run['id'])
+            if cancelled_runs:
+                logger.info(f"[PRE-MSG] Cancelled {len(cancelled_runs)} active runs before message addition.")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"[PRE-MSG] Failed to list or cancel existing runs for thread {thread_id}: {e}")
+
+        # 3. Add user message to the thread
         try:
             msg_payload = {"role": "user", "content": contextualized_message}
             msg_resp = await client.post(f"{OPENAI_API_BASE}/threads/{thread_id}/messages", json=msg_payload, headers=headers)
@@ -966,17 +982,21 @@ async def get_openai_response(
             logger.exception(f"Failed to add message to thread {thread_id}. Response: {e.response.text}")
             return f"(Error: Could not add message to thread: {e})", thread_id
 
-        # 2.5. Cancel any active runs on the thread to prevent conflicts
+        # 4. Cancel any remaining active runs AFTER adding message for extra safety
         try:
             existing_runs_resp = await client.get(f"{OPENAI_API_BASE}/threads/{thread_id}/runs", headers=headers)
             existing_runs_resp.raise_for_status()
+            cancelled_runs = []
             for run in existing_runs_resp.json().get("data", []):
                 if run['status'] in ['queued', 'in_progress', 'requires_action']:
-                    logger.warning(f"Cancelling active run {run['id']} with status {run['status']}.")
+                    logger.warning(f"[POST-MSG] Cancelling active run {run['id']} with status {run['status']} after adding message.")
                     cancel_url = f"{OPENAI_API_BASE}/threads/{thread_id}/runs/{run['id']}/cancel"
                     await client.post(cancel_url, headers=headers)
+                    cancelled_runs.append(run['id'])
+            if cancelled_runs:
+                logger.info(f"[POST-MSG] Cancelled {len(cancelled_runs)} additional active runs after message addition.")
         except httpx.HTTPStatusError as e:
-            logger.warning(f"Failed to list or cancel existing runs for thread {thread_id}: {e}")
+            logger.warning(f"[POST-MSG] Failed to list or cancel existing runs for thread {thread_id}: {e}")
 
         # 3. Create a run (with infinite retry)
         while True:
@@ -1183,6 +1203,8 @@ async def get_openai_response(
         # 5. Fetch the latest messages from the thread with 5-minute timeout
         start_time = asyncio.get_event_loop().time()
         timeout_seconds = 300  # 5 minutes
+        recovery_attempts = 0
+        max_recovery_attempts = 3
         
         while True:
             current_time = asyncio.get_event_loop().time()
@@ -1190,8 +1212,27 @@ async def get_openai_response(
             
             # Check if we've exceeded the 5-minute timeout
             if elapsed_time >= timeout_seconds:
-                logger.warning(f"OpenAI assistant stuck for {elapsed_time:.1f} seconds while fetching messages. Creating a new run in the same thread to unblock...")
+                if recovery_attempts >= max_recovery_attempts:
+                    logger.error(f"[MSG_RECOVERY] Max recovery attempts ({max_recovery_attempts}) reached. Giving up after {elapsed_time:.1f} seconds.")
+                    raise Exception(f"OpenAI assistant stuck for {elapsed_time:.1f} seconds. Max recovery attempts exceeded.")
+                
+                recovery_attempts += 1
+                logger.warning(f"OpenAI assistant stuck for {elapsed_time:.1f} seconds while fetching messages. Creating a new run in the same thread to unblock... (attempt {recovery_attempts}/{max_recovery_attempts})")
+                
                 try:
+                    # Check if there's already an active run before creating a new one
+                    runs_resp = await client.get(f"{OPENAI_API_BASE}/threads/{thread_id}/runs?limit=1", headers=headers)
+                    runs_resp.raise_for_status()
+                    runs_data = runs_resp.json().get("data", [])
+                    
+                    if runs_data and runs_data[0].get("status") in ["queued", "in_progress", "requires_action"]:
+                        logger.info(f"[MSG_RECOVERY] Found active run {runs_data[0]['id']} with status '{runs_data[0]['status']}'. Waiting instead of creating new run.")
+                        # Reset timeout to give the existing run more time
+                        start_time = asyncio.get_event_loop().time()
+                        recovery_attempts = 0  # Reset since we're not actually recovering
+                        await asyncio.sleep(10)
+                        continue
+                    
                     # Create a new run in the SAME thread to prompt assistant to produce a message
                     new_run_payload = {
                         "assistant_id": config.OPENAI_AGENT_ID,
@@ -1202,14 +1243,19 @@ async def get_openai_response(
                     new_run_id = new_run_resp.json()["id"]
                     logger.info(f"[MSG_RECOVERY] Created new run {new_run_id} in existing thread {thread_id} after message retrieval timeout")
                     
-                    # Poll the new run briefly to allow content generation
+                    # CRITICAL FIX: Reset timeout timer after successful recovery
                     run_id = new_run_id
                     run_start_time = asyncio.get_event_loop().time()
+                    start_time = asyncio.get_event_loop().time()  # Reset message fetch timeout
+                    recovery_attempts = 0  # Reset recovery counter after successful creation
                     continue
+                    
                 except Exception as recovery_error:
-                    logger.error(f"[MSG_RECOVERY] Failed to create new run after message retrieval timeout: {recovery_error}")
-                    # Backoff before retrying message fetch again
-                    await asyncio.sleep(5)
+                    logger.error(f"[MSG_RECOVERY] Failed to create new run after message retrieval timeout (attempt {recovery_attempts}/{max_recovery_attempts}): {recovery_error}")
+                    # Exponential backoff for recovery attempts
+                    backoff_time = min(30, 5 * (2 ** (recovery_attempts - 1)))
+                    logger.info(f"[MSG_RECOVERY] Backing off for {backoff_time} seconds before retry...")
+                    await asyncio.sleep(backoff_time)
                     continue
             
             try:
