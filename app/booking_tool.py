@@ -1283,21 +1283,66 @@ async def _make_booking_api_call(
                     "error": f"Booking API returned status {response.status_code}: {response.text[:200]}"  # Truncate for user
                 }
             
-            # Parse response to extract reservation ID
-            response_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-            reserva = response_data.get("reserva", "unknown")
-            
-            return {
-                "success": True,
-                "reserva": reserva,
-                "response": response_data
-            }
+            # Parse response to extract reservation ID with enhanced error handling
+            try:
+                content_type = response.headers.get("content-type", "")
+                logger.info(f"[BOOKING_API] Response content-type: {content_type}")
+                logger.info(f"[BOOKING_API] Response text (first 200 chars): {response.text[:200]}")
+                
+                if content_type.startswith("application/json"):
+                    response_data = response.json()
+                else:
+                    logger.warning(f"[BOOKING_API] Non-JSON response, attempting to parse anyway")
+                    try:
+                        response_data = response.json()
+                    except:
+                        # Fallback: try to extract reserva from text response
+                        response_text = response.text
+                        if "reserva" in response_text.lower():
+                            # Try to extract reservation number from text
+                            import re
+                            match = re.search(r'"?reserva"?\s*:\s*"?(\w+)"?', response_text, re.IGNORECASE)
+                            if match:
+                                reserva = match.group(1)
+                                logger.info(f"[BOOKING_API] Extracted reserva from text: {reserva}")
+                                return {
+                                    "success": True,
+                                    "reserva": reserva,
+                                    "response": {"reserva": reserva, "raw_text": response_text[:500]}
+                                }
+                        
+                        logger.warning(f"[BOOKING_API] Could not parse response as JSON, treating as success with unknown reserva")
+                        return {
+                            "success": True,
+                            "reserva": "unknown",
+                            "response": {"raw_text": response_text[:500]}
+                        }
+                
+                reserva = response_data.get("reserva", "unknown")
+                logger.info(f"[BOOKING_API] Successfully parsed JSON, reserva: {reserva}")
+                
+                return {
+                    "success": True,
+                    "reserva": reserva,
+                    "response": response_data
+                }
+                
+            except Exception as parse_error:
+                logger.error(f"[BOOKING_API] Response parsing failed but API returned 200: {parse_error}")
+                logger.info(f"[BOOKING_API] Treating as successful booking with parsing error")
+                # Since API returned 200, treat as success despite parsing error
+                return {
+                    "success": True,
+                    "reserva": "unknown",
+                    "response": {"parse_error": str(parse_error), "raw_text": response.text[:500]}
+                }
             
     except Exception as e:
-        logger.error(f"Booking API call failed: {e}")
+        error_msg = str(e) if str(e).strip() else f"Unknown error (type: {type(e).__name__})"
+        logger.error(f"Booking API call failed: {error_msg}", exc_info=True)
         return {
             "success": False,
-            "error": f"Booking API call failed: {e}"
+            "error": f"Booking API call failed: {error_msg}"
         }
 
 

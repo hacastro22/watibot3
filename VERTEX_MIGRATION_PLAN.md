@@ -43,40 +43,223 @@ Migrate from OpenAI Assistant API to Vertex AI Gemini 2.5 Pro with Agent Engine 
 
 ### Phase 1: Foundation (Week 1-2) - **Target: January 31, 2025**
 
-**Goal**: Establish Vertex AI infrastructure and basic functionality
+**Goal**: Establish Vertex AI infrastructure and basic functionality while maintaining production service
+
+**Zero-Downtime Development Strategy**:
+- [ ] **Environment Variable Preparation**: Add all Vertex AI environment variables with fallback logic to maintain OpenAI compatibility
+- [ ] **Feature Flag Implementation**: Implement `USE_VERTEX_AI` environment flag (default: false) to control migration activation
+- [ ] **Parallel Implementation**: Develop all Vertex AI code alongside existing OpenAI code without replacing it
+- [ ] **Non-Breaking Database Changes**: Ensure all `ADD COLUMN` operations are safe and don't affect existing queries
+- [ ] **Hard Switch Architecture**: When `USE_VERTEX_AI=true`, all operations run exclusively through Vertex AI with no OpenAI fallback
+- [ ] **Hot-Reload Testing**: Verify all changes can be deployed with simple service restart without data loss
 
 **Tasks**:
-- [ ] Set up Google Cloud project with Vertex AI enabled
-- [ ] Create Vertex AI Agent Engine instance
-- [ ] Implement basic Gemini 2.5 Pro API integration
-- [ ] Create Vertex AI Sessions management wrapper
-- [ ] Build conversation export/import utilities for all existing conversations
-- [ ] **Implement Critical Business Logic**: Re-implement the complete retry, timeout, and escalation logic from `app/main.py` and `app/openai_agent.py` into the new `vertex_agent.py`. This includes ensuring all necessary channel identifiers (e.g., `wa_id`, `subscriber_id`) are passed to tool-calling functions.
+
+#### Core Infrastructure
+
+##### Google Cloud Console Setup (Step-by-Step)
+- [ ] **Step 1: Google Cloud Project Setup**:
+  1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+  2. Click "Select a project" dropdown at top
+  3. Click "New Project" → Enter project name (e.g., "watibot3-vertex-ai")
+  4. Note the **Project ID** (will be used in environment variables)
+  5. Click "Create" and wait for project creation
+
+- [ ] **Step 2: Enable Required APIs**:
+  1. Navigate to "APIs & Services" → "Library"
+  2. Search and enable these APIs (click each, then "Enable"):
+     - **Vertex AI API** (`aiplatform.googleapis.com`)
+     - **Cloud Speech-to-Text API** (`speech.googleapis.com`)
+     - **Cloud Storage API** (`storage-api.googleapis.com`)
+  3. Wait for all APIs to be enabled (may take 2-3 minutes)
+
+- [ ] **Step 3: Create Service Account**:
+  1. Navigate to "IAM & Admin" → "Service Accounts"
+  2. Click "+ Create Service Account"
+  3. **Service account name**: `watibot3-vertex-service`
+  4. **Service account ID**: `watibot3-vertex-service` (auto-generated)
+  5. **Description**: `Service account for WatiBot3 Vertex AI integration`
+  6. Click "Create and Continue"
+
+- [ ] **Step 4: Assign Service Account Permissions**:
+  1. In "Grant this service account access to project" section:
+  2. Click "Select a role" and add these roles:
+     - **Vertex AI User** (`roles/aiplatform.user`)
+     - **Storage Object Viewer** (`roles/storage.objectViewer`)
+     - **Speech-to-Text Client** (`roles/speech.client`)
+  3. Click "Continue" → "Done"
+
+- [ ] **Step 5: Generate JSON Key**:
+  1. In Service Accounts list, click on `watibot3-vertex-service`
+  2. Go to "Keys" tab → "Add Key" → "Create new key"
+  3. Select "JSON" format → Click "Create"
+  4. **IMPORTANT**: JSON key file will download automatically
+  5. **SECURITY**: Move file to secure location: `/home/robin/watibot3/credentials/vertex-ai-key.json`
+  6. Set file permissions: `chmod 600 /home/robin/watibot3/credentials/vertex-ai-key.json`
+
+- [ ] **Step 6: Create Vertex AI Agent Engine**:
+  1. Navigate to "Vertex AI" → "Agent Builder"
+  2. Click "Create Engine" → Select "Agent Engine"
+  3. **Engine Name**: `watibot3-agent-engine`
+  4. **Location**: Select `us-central1` (recommended)
+  5. Configure system instructions and tools
+  6. Note the **Engine ID** from URL (format: `projects/{project-id}/locations/{location}/reasoningEngines/{engine-id}`)
+- [ ] **Feature Flag Configuration**: Add `USE_VERTEX_AI=false` environment variable to control migration activation
+- [ ] **Parallel Implementation**: Create `app/vertex_agent.py` alongside existing `app/openai_agent.py` (no replacement)
+- [ ] **Step 7: Environment Variable Configuration**:
+  1. Create credentials directory: `mkdir -p /home/robin/watibot3/credentials`
+  2. Add to `/home/robin/watibot3/.env`:
+     ```bash
+     # Vertex AI Configuration
+     USE_VERTEX_AI=false
+     GOOGLE_CLOUD_PROJECT_ID=your-project-id-here
+     VERTEX_AI_LOCATION=us-central1
+     VERTEX_AGENT_ENGINE_ID=your-engine-id-here
+     GOOGLE_APPLICATION_CREDENTIALS=/home/robin/watibot3/credentials/vertex-ai-key.json
+     ```
+  3. Update `app/config.py` to load Vertex AI variables:
+     ```python
+     # Vertex AI Configuration (add to config.py)
+     USE_VERTEX_AI = os.getenv('USE_VERTEX_AI', 'false').lower() == 'true'
+     GOOGLE_CLOUD_PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT_ID')
+     VERTEX_AI_LOCATION = os.getenv('VERTEX_AI_LOCATION', 'us-central1')
+     VERTEX_AGENT_ENGINE_ID = os.getenv('VERTEX_AGENT_ENGINE_ID')
+     GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+     ```
+
+- [ ] **Step 8: Verify Credentials**:
+  1. Test authentication: `gcloud auth application-default login`
+  2. Set project: `gcloud config set project YOUR_PROJECT_ID`
+  3. Test Vertex AI access: `gcloud ai models list --region=us-central1`
+  4. Verify service account has correct permissions
+- [ ] **Hot-Reload Safe Database Schema**: Execute non-breaking `ADD COLUMN` operations for `session_id`, `vertex_migrated`, `migration_date`, `vertex_context_injected`
+
+#### Vision Model Migration Strategy
+- [ ] **Migrate OpenAI Vision Models**: Replace `gpt-4o-mini` vision calls in `app/image_classifier.py` and `app/payment_proof_analyzer.py` with Gemini 2.5 Pro vision capabilities
+- [ ] **Image Processing Pipeline**: Adapt base64 image encoding and multimodal prompt formatting for Vertex AI compatibility
+- [ ] **Vision Tool Integration**: Ensure payment proof analysis and image classification work with Vertex sessions
+
+#### Audio Transcription Migration
+- [ ] **CRITICAL: Migrate Whisper API**: Replace OpenAI Whisper API in `app/whisper_client.py` with Google Cloud Speech-to-Text API
+- [ ] **Audio Format Handling**: Maintain opus-to-wav conversion pipeline for Google Cloud compatibility
+- [ ] **Spanish Language Support**: Ensure Spanish language transcription (`es-ES`) configuration in Google Cloud Speech-to-Text
+- [ ] **Timeout & Error Handling**: Replicate 60-second timeout and error handling patterns for Google Cloud Speech API
+- [ ] **API Integration**: Update `transcribe_audio_opus()` function signature and error responses to maintain compatibility with existing callers
+
+#### Critical Business Logic & Error Handling
+- [ ] **Implement Critical Business Logic**: Re-implement the complete retry, timeout, and escalation logic from `app/main.py` and `app/openai_agent.py` into the new `vertex_agent.py`
+- [ ] **Fix Race Conditions**: Address the 5-minute timeout race condition bug from `openai_agent.py` (lines 1185-1207) where `start_time` is not reset after successful recovery
+- [ ] **Timeout Recovery Logic**: Implement equivalent 15-minute escalation logic with exponential backoff for Vertex sessions
+- [ ] **Tool Identifier Injection**: Design and implement mechanism to pass routing identifiers (`phone_number`, `wa_id`, `subscriber_id`, `channel`) to Vertex tool calls for functions like `get_conversation_snippets` and `validate_bank_transfer`
 - [ ] Build session state management and recovery mechanisms
 - [ ] Create rate limiting and exponential backoff systems
+
+#### Response Quality & Language Handling
+- [ ] **JSON Response Guard**: Implement equivalent output validation guard for Vertex responses to ensure clean Spanish customer-facing messages (replaces OpenAI Responses API guard)
+- [ ] **Multi-Model Coordination**: Design strategy for coordinating main agent (Vertex) with vision models for complex requests
+
+#### Data Migration & Context Handling
+- [ ] Build conversation export/import utilities for all existing conversations
+- [ ] **Universal Context Provider**: Implement abstraction layer for conversation context retrieval that works with both OpenAI threads (during transition) and Vertex sessions
+- [ ] **WATI Pre-Live History Injection**: Replicate sophisticated one-time history import from `app/main.py` (lines 514-560) for Vertex sessions:
+  - [ ] Implement `get_pre_live_history_vertex()` with WATI API pagination handling (100 messages per page, max 20 pages)
+  - [ ] Handle WATI API rate limiting (429 responses with 30-second delays)
+  - [ ] Parse variable-length fractional timestamps from WATI API responses
+  - [ ] Filter messages before GO_LIVE_DATE (July 5, 2025) and limit to 200 messages
+  - [ ] Create Vertex equivalent of `add_message_to_thread()` for session context injection
+  - [ ] Format history in Spanish: "Este es el historial de conversación más reciente..."
+  - [ ] Maintain `history_imported` flag management and prevent duplicate imports
+- [ ] **Agent Context Injection**: Implement customer-human agent conversation detection and injection:
+  - [ ] Create `detect_agent_interactions()` to identify conversations missed by webhooks (likely human agent responses)
+  - [ ] Implement `inject_agent_context_vertex()` equivalent to `agent_context_injector.py` functionality
+  - [ ] Format agent interaction history: "=== CONVERSACIONES CON AGENTES HUMANOS ==="
+  - [ ] Handle context injection timing and frequency limits to avoid token overflow
+  - [ ] Create agent context tracking flag (`vertex_context_injected`) in database schema
 - [ ] Test system instructions application and validation
 - [x] **Deprecate Legacy Database**: The legacy MySQL `conversation_history` table is officially deprecated. All tools (`app/booking_tool.py`) now correctly source context from the modern conversation store (OpenAI threads, soon to be Vertex AI sessions).
-- [ ] **Database Schema Migration**: Add `session_id`, `vertex_migrated`, and `migration_date` columns to the `threads` table for Vertex session handling.
-- [ ] Ensure webhook response compatibility with WATI and ManyChat
+- [ ] **Database Schema Migration**: Add `session_id`, `vertex_migrated`, `migration_date`, and `vertex_context_injected` columns to the `threads` table for Vertex session handling.
+
+#### Utility Script Migration
+- [ ] **Utility Script Compatibility**: Create Vertex-compatible versions or dual-compatibility for critical utility scripts (`agent_context_injector.py`, `webhook_vs_api_comparator.py`, `inspect_thread.py`)
+- [ ] **Clean Legacy Artifacts**: Remove failed Responses API artifacts and dynamic protocol loading remnants from codebase
+
+#### Integration & Compatibility  
+- [ ] **Webhook Handler Updates**: Implement dual-path logic in `app/main.py` controlled by `USE_VERTEX_AI` flag
+- [ ] **Zero-Downtime Router**: Create `get_agent_for_conversation()` function that routes to OpenAI or Vertex based on feature flag and migration status
+- [ ] **Vertex-Only Mode**: When `USE_VERTEX_AI=true`, all operations must use Vertex AI exclusively - no OpenAI fallback on errors
+- [ ] **Service Restart Safety**: Verify all changes work with simple `systemctl restart watibot3.service`
 
 **Deliverables**:
+
+#### Core Infrastructure
 - Working Vertex AI Agent Engine instance
+- Complete Vertex AI configuration management in `app/config.py`
 - Basic Gemini 2.5 Pro chat functionality
-- Migration utilities (export from OpenAI, import to Vertex)
+
+#### Vision & Multi-Model Integration
+- Migrated vision models (`app/vertex_image_classifier.py`, `app/vertex_payment_analyzer.py`)
+- Multi-model coordination strategy and implementation
+- Working image classification and payment proof analysis with Vertex
+
+#### Business Logic & Error Handling
 - Robust error handling system equivalent to OpenAI patterns
+- Fixed race condition and timeout recovery logic
+- Tool identifier injection mechanism
+- JSON response guard for Spanish output validation
 - Session recovery and timeout management
+
+#### Data Migration & Context
+- Migration utilities (export from OpenAI, import to Vertex)
+- Universal context provider for conversation history
+- **WATI Pre-Live History Injection**: Complete replication of sophisticated one-time history import with WATI API integration, rate limiting, and Spanish formatting
+- **Agent Context Injection**: Detection and injection of customer-human agent conversations missed by webhooks
+- Database schema with `vertex_context_injected` tracking flag
+- Vertex-compatible utility scripts
+
+#### Audio & Media Processing
+- **Audio Transcription**: Google Cloud Speech-to-Text API integration for voice message processing
+- **Media Pipeline**: Opus-to-wav conversion compatibility maintained
+
+#### Integration
 - Webhook handlers updated for Vertex AI integration
 - Timer callback functions migrated to use Vertex sessions
 
 **Success Criteria**:
+
+#### Core Functionality
 - Can create/manage Vertex AI sessions
 - Can send/receive messages via Gemini 2.5 Pro
 - Can export OpenAI thread data
 - Database migration completed with rollback capability
+
+#### Vision & Multi-Model
+- Image classification works with Vertex (equivalent accuracy to gpt-4o-mini)
+- Payment proof analysis works with Vertex (equivalent accuracy)
+- Multi-model requests coordinate properly between agent and vision models
+
+#### Business Logic & Error Handling
+- Timeout recovery logic works without race conditions
+- Tool calls receive proper routing identifiers
+- Spanish response guard prevents JSON artifacts in customer messages
+- 15-minute escalation logic functions correctly
+
+#### Context & Integration
 - All tools accessing conversation context migrated
-- History import mechanism replicated for Vertex sessions
+- Universal context provider works for both OpenAI threads and Vertex sessions
+- **WATI Pre-Live History Import**: One-time history injection works with WATI API pagination, rate limiting, and proper timestamp parsing
+- **Agent Context Detection**: System correctly identifies and injects customer-human agent conversations missed by webhooks
+- **History Import Flags**: `history_imported` and `vertex_context_injected` flags properly managed to prevent duplicates
+- **Spanish Formatting**: All injected context properly formatted in Spanish with appropriate headers
 - WATI and ManyChat webhooks successfully route to Vertex AI
 - Message buffering and timer processing work with Vertex sessions
+- Utility scripts work with Vertex sessions
+
+#### Quality Assurance
+- **Production Service Continuity**: Webhook processing continues uninterrupted during all Phase 1 development
+- **Feature Flag Testing**: Verify `USE_VERTEX_AI=false` maintains 100% OpenAI compatibility
+- **Hot Deployment**: All changes deployable via service restart without data corruption
+- [x] **Rollback Capability**: Instant rollback to OpenAI by setting `USE_VERTEX_AI=false` and restarting service (hard switch back)
+- **No Breaking Changes**: Existing OpenAI code paths remain fully functional
 
 ### Phase 2: Migration Execution (Week 3) - **Target: February 7, 2025**
 

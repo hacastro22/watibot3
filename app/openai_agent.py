@@ -918,6 +918,7 @@ async def get_openai_response(
         f"  * If the `amount` field is missing, ask the customer to confirm the transfer amount. "
         f"  * DO NOT attempt validation with incomplete data as it will cause system errors. "
         f"  * Only call `validate_bank_transfer` once you have complete data: `slip_date`, `slip_amount`, and `booking_amount`. "
+        f"- **AUTOMATIC BOOKING TRIGGER**: Once payment validation succeeds (either CompraClick or Bank Transfer), you MUST IMMEDIATELY proceed to steps 5 and 6 below WITHOUT waiting for additional customer input or confirmation. The customer has already provided payment - proceed directly to complete their booking. "
         f"4. **Handling Validation Failures (Retry Logic)**: "
         f"- If validation fails (payment not found), you MUST call the appropriate retry tool: "
         f"- `trigger_compraclick_retry_for_missing_payment` for CompraClick. "
