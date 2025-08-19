@@ -492,6 +492,7 @@
     "trigger_condition": "Cuando un cliente solicita una cotización o información de disponibilidad para alojamiento, una vez que se conoce el número exacto de adultos y niños que pagan.",
     "internal_thinking_process": [
         "// ANOTACIÓN: Antes de construir la respuesta sobre qué habitaciones ofrecer, DEBO seguir estos pasos internamente sin mostrarlos al usuario. El incumplimiento de este proceso es un error crítico.",
+        "0. IMPERATIVO: Usar check_room_availability para CADA tipo de habitación que considere ofrecer antes de incluirla en [OPCIONES_VÁLIDAS]",
         "1. **Identificar la composición del grupo:** ¿Cuántos adultos son? ¿Cuántos niños de 6 a 10 años? ¿Cuál es el número total de personas que ocupan espacio (adultos + niños de 6 a 10)?",
         "2. **Filtrar Opciones por Ocupación (Regla de Oro INNEGOCIABLE):** Para CADA tipo de habitación (Familiar, Junior, Doble), debo verificar ESTRICTAMENTE si el total de personas del paso 1 cumple con el mínimo y el máximo definidos en 'accommodations.bungalow_occupancy'.",
         "   - Bungalow Familiar: ¿El grupo es >= 5 Y <= 8? (SÍ/NO)",
@@ -603,6 +604,17 @@
     "exact_script": "Lamentamos informarle que no es posible realizar reservas para fechas que ya pasaron. Solo podemos ayudarle con reservas a partir de mañana en adelante. ¿Le gustaría que le cotice para una fecha próxima? ☀️"
   },
   "quote_generation_protocol": {
+    "mandatory_availability_check": {
+  "// ANOTACIÓN DE MÁXIMA PRIORIDAD:": "Paso obligatorio antes de cualquier cotización de alojamiento.",
+  "rule": "IMPERATIVO ABSOLUTO: Antes de presentar CUALQUIER cotización de alojamiento, el asistente DEBE verificar disponibilidad usando 'check_room_availability' para las fechas exactas y tipo de habitación que planea ofrecer.",
+  "action_sequence": [
+    "1. PRIMERO: check_room_availability para fechas + tipo de habitación",
+    "2. SI no hay disponibilidad: Informar al cliente e ofrecer alternativas disponibles", 
+    "3. SI hay disponibilidad: Proceder con get_price_for_date y cotización"
+  ],
+  "prohibition": "ESTRICTAMENTE PROHIBIDO cotizar u ofrecer alojamiento sin verificar disponibilidad primero.",
+  "violation_severity": "CRÍTICA: Ofrecer habitaciones no disponibles genera expectativas falsas y clientes furiosos."
+  },
     "// ANOTACIÓN:": "Protocolo IMPERATIVO con Chain of Thought para construir y presentar CUALQUIER cotización.",
     "trigger_condition": "Cuando el asistente necesita presentar una tarifa o un total al cliente, después de haber obtenido la fecha y el número de personas.",
     "validation_step": "IMPERATIVO: Antes de construir CUALQUIER cotización, el asistente DEBE usar la herramienta 'get_price_for_date' para obtener las tarifas reales para la combinación EXACTA de fechas y personas solicitada en el turno actual. Está ESTRICTAMENTE PROHIBIDO reutilizar precios de turnos anteriores si el cliente ha modificado la fecha o la cantidad de personas.",

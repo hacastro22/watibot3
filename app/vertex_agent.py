@@ -9,6 +9,8 @@ import time
 import os
 import json
 import inspect
+from datetime import datetime
+from pytz import timezone
 from typing import Optional, Tuple, List, Dict, Any
 from google.cloud import aiplatform
 import vertexai
@@ -709,12 +711,83 @@ async def get_openai_response(
         # Get or create session ID
         session_id = thread_id or _get_or_create_session(wa_id)
         
-        # Get conversation context
-        context = _get_conversation_context(wa_id, session_id)
+        # Build full conversation prompt (session maintains context automatically)
+        full_prompt = prompt
+        
+        from datetime import datetime
+        from pytz import timezone
+        
+        el_salvador_tz = timezone("America/El_Salvador")
+        now_in_sv = datetime.now(el_salvador_tz)
+        datetime_str = now_in_sv.strftime("%A, %Y-%m-%d, %H:%M")
+        
+        contextualized_message = (
+            f"The current date, day, and time in El Salvador (GMT-6) is {datetime_str}. "
+            f"The current date, day, and time in El Salvador (GMT-6) is {datetime_str}. "
+            f"CRITICAL Booking Workflow: "
+            f"1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). "
+            f"2. **Payment**: "
+            f"- For CompraClick: Create a payment link using `create_compraclick_link`. "
+            f"- For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. "
+            f"3. **Payment Verification (Sync -> Validate -> Book)**: "
+            f"- When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. "
+            f"**CRITICAL CompraClick Proof Distinction**: "
+            f"- INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). "
+            f"- VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. "
+            f"- If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. "
+            f"- If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. "
+            f"- If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. "
+            f"**CRITICAL Payment Method Consistency**: "
+            f"- Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that method throughout the conversation. "
+            f"- DO NOT assume the customer changed payment methods unless they EXPLICITLY state so (e.g., 'decidí hacer transferencia bancaria' or 'mejor hice un depósito'). "
+            f"- If customer sends a bank transfer proof when CompraClick was selected, first confirm: '¿Decidiste cambiar el método de pago a transferencia bancaria en lugar de CompraClick?' "
+            f"**CompraClick Fallback Validation Process**: "
+            f"- Track failed CompraClick authorization code attempts (wrong codes or customer can't find the code). "
+            f"- After 3 failed attempts OR if customer explicitly states they cannot find the authorization code, activate fallback validation: "
+            f"  1. Inform customer: 'Entiendo que no puede encontrar el código de autorización. Puedo verificar su pago con información alternativa.' "
+            f"  2. Request: (a) Last 4 digits of the credit card used, (b) Exact amount charged, (c) Date of payment "
+            f"  3. Call `validate_compraclick_payment_fallback` with the provided information "
+            f"  4. If fallback validation succeeds, proceed with booking as normal "
+            f"  5. If fallback validation fails, provide specific guidance based on the error (wrong card digits, amount mismatch, etc.) "
+            f"**IMMEDIATE SYNC TRIGGER**: If the user mentions they have made a bank transfer (e.g., 'ya transferí', 'pago enviado'), you MUST immediately call `sync_bank_transfers()` BEFORE asking for proof or any other action. This ensures the system has the latest data. "
+            f"- **CRITICAL SYNC STEP**: Before validating, you MUST sync the latest payments. "
+            f"- For CompraClick, call `sync_compraclick_payments()`. "
+            f"- For Bank Transfers, call `sync_bank_transfers()`. "
+            f"- **VALIDATION STEP**: "
+            f"- **CompraClick**: After syncing, use `validate_compraclick_payment` with the correct `authorization_number` and `booking_total`. "
+            f"  * If validation fails with 'Authorization code not found' after 3 attempts or customer can't find code, use `validate_compraclick_payment_fallback` instead. "
+            f"- **Bank Transfer**: CRITICAL - Before calling `validate_bank_transfer`, verify that ALL required data was extracted from the payment proof: "
+            f"  * If the `timestamp` field is missing or empty from `analyze_payment_proof` result, you MUST ask the customer to provide the exact date of the bank transfer (e.g., 'Por favor, indícame la fecha exacta de la transferencia bancaria (formato DD/MM/AAAA)'). "
+            f"  * If the `amount` field is missing, ask the customer to confirm the transfer amount. "
+            f"  * DO NOT attempt validation with incomplete data as it will cause system errors. "
+            f"  * Only call `validate_bank_transfer` once you have complete data: `slip_date`, `slip_amount`, and `booking_amount`. "
+            f"- **AUTOMATIC BOOKING TRIGGER**: Once payment validation succeeds (either CompraClick or Bank Transfer), you MUST IMMEDIATELY proceed to steps 5 and 6 below WITHOUT waiting for additional customer input or confirmation. The customer has already provided payment - proceed directly to complete their booking. "
+            f"4. **Handling Validation Failures (Retry Logic)**: "
+            f"- If validation fails (payment not found), you MUST call the appropriate retry tool: "
+            f"- `trigger_compraclick_retry_for_missing_payment` for CompraClick. "
+            f"- `start_bank_transfer_retry_process` for Bank Transfers. "
+            f"- Inform the user that you are verifying the payment and will notify them shortly. DO NOT ask them to send the proof again unless the retry process also fails. "
+            f"5. **MANDATORY Office Status Check**: "
+            f"- **BEFORE ANY BOOKING ATTEMPT**: You MUST call `check_office_status()` to determine if automation is allowed. This is MANDATORY - no exceptions. "
+            f"- **If office_status = 'closed' OR can_automate = true**: Proceed with automated booking using `make_booking`. "
+            f"- **If office_status = 'open' AND can_automate = false**: "
+            f"  1. Inform customer that offices are open and they need to speak with a human agent. "
+            f"  2. Send a message containing 'handover' to trigger the WATI handover process (this will mark conversation as PENDING and assign to operator). "
+            f"  3. DO NOT attempt booking. "
+            f"6. **Booking Confirmation**: "
+            f"- **CRITICAL**: After confirming automation is allowed via `check_office_status`, immediately call the `make_booking` function to reserve the room. DO NOT ask for the information again; use the data you have already collected. "
+            f"- After calling `make_booking`, inform the user that their booking is confirmed and they will receive an email confirmation. "
+            f"When asked for location, use `send_location_pin`. "
+            f"When asked for the menu, use `send_menu_pdf`. "
+            f"When asked for availability for multi-night stays (2+ nights), use `check_smart_availability` to offer partial stay options if full period unavailable. For single night stays, use `check_room_availability`. "
+            f"When asked for pictures of accommodations, use `send_bungalow_pictures`. When asked for pictures of public areas, facilities, or common spaces, use `send_public_areas_pictures`. "
+            f"To create a payment link, use `create_compraclick_link`. "
+            f"Do not answer from memory. User query: {prompt}"
+        )
         
         # Build full conversation prompt
         system_instructions = _get_system_instructions()
-        full_prompt = f"{system_instructions}\n\n{context}\n\nUser: {prompt}"
+        full_prompt = f"{system_instructions}\n\n{contextualized_message}"
         
         # Process with retry logic and timeout recovery
         response_text = await _process_with_retry_logic(full_prompt, session_id, wa_id, subscriber_id, channel)
@@ -742,30 +815,40 @@ async def _process_tool_calls(tool_calls: List[Dict], wa_id: Optional[str], subs
             function_to_call = AVAILABLE_FUNCTIONS.get(function_name)
             
             if function_to_call:
+                # Fix parameter mapping for specific functions
+                if function_name == "get_price_for_date":
+                    # Map 'date' to 'date_str' for compatibility
+                    if 'date' in function_args:
+                        function_args['date_str'] = function_args.pop('date')
+                    # Remove extra parameters not expected by the function
+                    function_args = {k: v for k, v in function_args.items() if k in ['date_str']}
+                
                 logger.info(f"[VERTEX] Calling function: {function_name} with args: {function_args}")
                 
-                # Inject routing identifiers (critical fix from openai_agent.py)
-                if asyncio.iscoroutinefunction(function_to_call):
-                    sig = inspect.signature(function_to_call)
-                    
-                    # Auto-inject phone_number/wa_id
-                    if 'phone_number' in sig.parameters and wa_id:
-                        function_args['phone_number'] = wa_id
-                        logger.info(f"[VERTEX] Auto-injected phone_number for {function_name}")
-                    
-                    if 'wa_id' in sig.parameters and wa_id:
-                        function_args['wa_id'] = wa_id
-                        logger.info(f"[VERTEX] Auto-injected wa_id for {function_name}")
-                    
-                    # Auto-inject ManyChat identifiers
-                    if 'subscriber_id' in sig.parameters and subscriber_id:
-                        function_args['subscriber_id'] = subscriber_id
-                        logger.info(f"[VERTEX] Auto-injected subscriber_id for {function_name}")
-                    
-                    if 'channel' in sig.parameters and channel:
-                        function_args['channel'] = channel
-                        logger.info(f"[VERTEX] Auto-injected channel for {function_name}")
-                    
+                # Auto-inject identifiers for functions that need them
+                import inspect
+                sig = inspect.signature(function_to_call)
+                
+                # Auto-inject phone number/wa_id for functions that need it
+                if 'phone_number' in sig.parameters and wa_id:
+                    function_args['phone_number'] = wa_id
+                    logger.info(f"[VERTEX] Auto-injected phone_number for {function_name}")
+                
+                if 'wa_id' in sig.parameters and wa_id:
+                    function_args['wa_id'] = wa_id
+                    logger.info(f"[VERTEX] Auto-injected wa_id for {function_name}")
+                
+                # Auto-inject ManyChat identifiers
+                if 'subscriber_id' in sig.parameters and subscriber_id:
+                    function_args['subscriber_id'] = subscriber_id
+                    logger.info(f"[VERTEX] Auto-injected subscriber_id for {function_name}")
+                
+                if 'channel' in sig.parameters and channel:
+                    function_args['channel'] = channel
+                    logger.info(f"[VERTEX] Auto-injected channel for {function_name}")
+                
+                # Execute function (async or sync)
+                if inspect.iscoroutinefunction(function_to_call):
                     result = await function_to_call(**function_args)
                 else:
                     result = function_to_call(**function_args)
@@ -878,33 +961,128 @@ async def _recover_session(wa_id: Optional[str], failed_session_id: str) -> Opti
         logger.error(f"[VERTEX] Session recovery failed: {e}")
         return None
 
-def _get_conversation_context(wa_id: Optional[str], session_id: Optional[str]) -> str:
+# Session storage for chat continuity
+_vertex_sessions = {}
+
+def _get_or_create_chat_session(model: GenerativeModel, wa_id: Optional[str], tools: list) -> generative_models.ChatSession:
     """
-    Get conversation context from thread store or session history
+    Get or create a Vertex AI chat session for conversation continuity
     
     Args:
-        wa_id: WhatsApp ID
-        session_id: Session identifier
+        model: Vertex AI GenerativeModel instance
+        wa_id: WhatsApp ID as session key
+        tools: Vertex AI tools for the session
         
     Returns:
-        Formatted conversation context
+        ChatSession instance
     """
+    global _vertex_sessions
+    
+    session_key = wa_id or "default"
     
     try:
-        # Try to get recent conversation context
-        if wa_id:
-            # Get thread info for conversation context
-            thread_info = thread_store.get_thread_id(wa_id)
-            if thread_info:
-                # Use existing conversation context logic
-                context = f"Conversación existente para {wa_id}."
-                return context
+        # Return existing session if available
+        if session_key in _vertex_sessions:
+            logger.info(f"[VERTEX] Using existing chat session for {session_key}")
+            return _vertex_sessions[session_key]
         
-        return "Conversación nueva."
+        # Create new chat session
+        logger.info(f"[VERTEX] Creating new chat session for {session_key}")
+        chat_session = model.start_chat(history=[])
+        
+        # Store session for reuse
+        _vertex_sessions[session_key] = chat_session
+        
+        # Check for migrated conversation history to inject
+        if wa_id:
+            _inject_migrated_history_if_available(wa_id, chat_session)
+        
+        return chat_session
         
     except Exception as e:
-        logger.warning(f"[VERTEX] Failed to get conversation context: {e}")
-        return "Conversación nueva."
+        logger.error(f"[VERTEX] Failed to create chat session: {e}")
+        # Fallback to new session without storage
+        return model.start_chat(history=[])
+
+def _inject_migrated_history_if_available(wa_id: str, chat_session: generative_models.ChatSession):
+    """
+    Check for migrated OpenAI conversation history and inject into new Vertex AI session
+    
+    Args:
+        wa_id: WhatsApp ID to check for migrated history
+        chat_session: Vertex AI ChatSession to inject history into
+    """
+    try:
+        # Check if this conversation was migrated from OpenAI
+        thread_info = thread_store.get_thread_id(wa_id)
+        
+        if not thread_info:
+            logger.info(f"[VERTEX] No thread info found for {wa_id}")
+            return
+            
+        # Check if already migrated and context injected
+        vertex_migrated = thread_info.get('vertex_migrated', False)
+        context_injected = thread_info.get('vertex_context_injected', False)
+        
+        if not vertex_migrated:
+            logger.info(f"[VERTEX] No migrated history for {wa_id}")
+            return
+            
+        if context_injected:
+            logger.info(f"[VERTEX] Context already injected for {wa_id}")
+            return
+            
+        # This conversation was migrated but context not yet injected
+        logger.info(f"[VERTEX] Found migrated conversation for {wa_id}, but messages were already processed during migration")
+        
+        # The actual message injection would have happened during the migration script
+        # Mark as context injected to avoid repeated attempts (if function exists)
+        try:
+            thread_store.mark_context_injected(wa_id)
+        except AttributeError:
+            logger.info(f"[VERTEX] mark_context_injected function not available, continuing without marking")
+        
+    except Exception as e:
+        logger.error(f"[VERTEX] Failed to check/inject migrated history for {wa_id}: {e}")
+
+async def inject_session_context(session_id: str, context_message: str) -> bool:
+    """
+    Inject migrated conversation history into a Vertex AI chat session
+    
+    Args:
+        session_id: Vertex AI session identifier (wa_id)
+        context_message: Formatted conversation history to inject
+        
+    Returns:
+        bool: Success/failure status
+    """
+    try:
+        global _vertex_sessions
+        
+        # Check if session exists
+        if session_id not in _vertex_sessions:
+            logger.warning(f"[VERTEX] Session {session_id} not found for context injection")
+            return False
+            
+        chat_session = _vertex_sessions[session_id]
+        
+        # Send the context message to establish history in the session
+        logger.info(f"[VERTEX] Injecting migrated context into session {session_id}")
+        
+        response = chat_session.send_message(
+            context_message,
+            generation_config=generative_models.GenerationConfig(
+                max_output_tokens=100,  # Short response for context injection
+                temperature=0.1
+            )
+        )
+        
+        logger.info(f"[VERTEX] Successfully injected context into session {session_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[VERTEX] Failed to inject context into session {session_id}: {e}")
+        return False
 
 async def add_message_to_thread(session_id: str, message: str) -> bool:
     """
@@ -916,19 +1094,14 @@ async def add_message_to_thread(session_id: str, message: str) -> bool:
         message: Formatted history message to inject
         
     Returns:
-        True if successful, False otherwise
+        bool: Success/failure status
     """
-    
     try:
-        logger.info(f"[VERTEX] Injecting history into session {session_id}: {message[:100]}...")
-        
-        # For Vertex AI, we store context in thread_store for continuity
-        # The actual context injection happens in _get_conversation_context()
-        
-        return True
+        # Use the session context injection for compatibility
+        return await inject_session_context(session_id, message)
         
     except Exception as e:
-        logger.exception(f"[VERTEX] Failed to inject message into session {session_id}: {e}")
+        logger.error(f"[VERTEX] Failed to add message to session {session_id}: {e}")
         return False
 
 async def create_vertex_session(wa_id: str) -> Optional[str]:
@@ -1045,11 +1218,49 @@ async def _process_with_retry_logic(
             )
             vertex_tools = [dispatch_tool]
             
-            # Generate response
+            # Get or create chat session for conversation continuity
+            chat_session = _get_or_create_chat_session(model, wa_id, vertex_tools)
+            
+            # Generate response with tool configuration
             logger.info(f"[VERTEX] Generating response (attempt {retry_count + 1}/{max_retries}) with {len(vertex_tools)} tools")
-            response = model.generate_content(
-                full_prompt,
-                tools=vertex_tools,
+            
+            # Add STRONG tool instruction to prompt with contextualized workflow
+            el_salvador_tz = timezone("America/El_Salvador")
+            now_in_sv = datetime.now(el_salvador_tz)
+            datetime_str = now_in_sv.strftime("%A, %Y-%m-%d, %H:%M")
+            
+            tool_instruction = f"""
+
+CRITICAL TOOL USAGE RULES:
+1. For ANY pricing question (cuanto cuesta, precio, tarifa, cotizar), you MUST call dispatch_function with function_name="get_price_for_date"
+2. For booking requests, you MUST call dispatch_function with function_name="book_room"  
+3. For payment validation, you MUST call dispatch_function with function_name="validate_bank_transfer"
+4. NEVER give generic responses for pricing - ALWAYS get real data first
+
+MANDATORY: If customer asks about prices, dates, or availability, call dispatch_function IMMEDIATELY before responding.
+
+CONTEXTUALIZED BOOKING WORKFLOW:
+Current date/time in El Salvador (GMT-6): {datetime_str}
+
+CRITICAL Booking Workflow:
+1. **Collect Information**: Gather all necessary booking details (dates, guests, package, etc.)
+2. **Payment**: Create CompraClick links with create_compraclick_link or provide bank transfer details
+3. **Payment Verification**: 
+   - For CompraClick: Use analyze_payment_proof then validate_compraclick_payment
+   - For Bank Transfer: Use analyze_payment_proof then validate_bank_transfer
+   - CRITICAL: Before validation, sync payments with sync_compraclick_payments() or sync_bank_transfers()
+4. **Office Status Check**: MANDATORY call check_office_status() before ANY booking attempt
+5. **Booking Confirmation**: If automation allowed, call make_booking immediately after payment validation
+
+TOOL DISPATCH EXAMPLES:
+- Pricing: dispatch_function(function_name="get_price_for_date", arguments={{"date_str": "2025-08-24"}})
+- Payment proof: dispatch_function(function_name="analyze_payment_proof", arguments={{}})
+- Booking: dispatch_function(function_name="make_booking", arguments={{}})"""
+            enhanced_prompt = full_prompt + tool_instruction
+            
+            # Use chat session for conversation continuity
+            response = chat_session.send_message(
+                enhanced_prompt,
                 generation_config=generative_models.GenerationConfig(
                     max_output_tokens=2048,
                     temperature=0.7,
@@ -1100,12 +1311,39 @@ async def _process_with_retry_logic(
                     logger.info(f"[VERTEX] Processing {len(tool_calls)} tool calls")
                     tool_results = await _process_tool_calls(tool_calls, wa_id, subscriber_id, channel)
                     
-                    # Combine response with tool results
-                    if response_text:
-                        combined_response = f"{response_text}\n\n" + "\n".join(tool_results)
+                    # Make follow-up call to Vertex AI with tool results to generate Spanish response
+                    logger.info(f"[VERTEX] Making follow-up call with tool results")
+                    tool_context = f"\nTool Results:\n" + "\n".join([f"- {result}" for result in tool_results])
+                    follow_up_prompt = f"{enhanced_prompt}{tool_context}\n\nBased on the tool results above, provide a complete Spanish response to the customer."
+                    
+                    follow_up_response = chat_session.send_message(
+                        follow_up_prompt,
+                        generation_config=generative_models.GenerationConfig(
+                            max_output_tokens=2048,
+                            temperature=0.7,
+                            top_p=0.8,
+                            top_k=40
+                        ),
+                        safety_settings={
+                            generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                            generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                            generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                            generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        }
+                    )
+                    
+                    # Extract final response text
+                    if follow_up_response.candidates:
+                        final_candidate = follow_up_response.candidates[0]
+                        final_response = ""
+                        for part in final_candidate.content.parts:
+                            if hasattr(part, 'text') and part.text:
+                                final_response += part.text
+                        response_text = final_response
+                        logger.info(f"[VERTEX] Generated follow-up response using tool data")
                     else:
-                        combined_response = "\n".join(tool_results)
-                    response_text = combined_response
+                        # Fallback to raw tool results if follow-up fails
+                        response_text = "\n".join(tool_results)
                 
                 # Apply JSON response guard for clean Spanish output
                 response_text = _apply_json_response_guard(response_text)
