@@ -1,35 +1,26 @@
 import os
 from dotenv import load_dotenv
-
-load_dotenv()
-
-# WATI Configuration
-WATI_API_KEY = os.getenv("WATI_API_KEY")
-WATI_API_URL = os.getenv("WATI_API_URL")
-
-# OpenAI Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_AGENT_ID = os.getenv("OPENAI_AGENT_ID")
-
-# Webhook Configuration
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-
-# Database Configuration
-DB_HOST = os.getenv("DB_HOST")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
-
-from dotenv import load_dotenv
 from pathlib import Path
 
 # Load environment variables from .env file
 load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env')
 
+# WATI Configuration
 WATI_API_KEY = os.getenv('WATI_API_KEY')
 WATI_API_URL = os.getenv('WATI_API_URL', 'https://app.wati.io/api/v1')
+
+# OpenAI Configuration (Current Production)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_AGENT_ID = os.getenv('OPENAI_AGENT_ID')
+
+# Vertex AI Configuration (Migration Target)
+USE_VERTEX_AI = os.getenv('USE_VERTEX_AI', 'false').lower() == 'true'
+GOOGLE_CLOUD_PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT_ID')
+VERTEX_AI_LOCATION = os.getenv('VERTEX_AI_LOCATION', 'us-central1')
+VERTEX_AGENT_ENGINE_ID = os.getenv('VERTEX_AGENT_ENGINE_ID')
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+
+# Webhook Configuration
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
 
 # Gmail Configuration
@@ -48,3 +39,17 @@ MANYCHAT_INSTAGRAM_API_KEY = os.getenv('MANYCHAT_INSTAGRAM_API_KEY')  # Instagra
 
 # Public media base URL used to build public links for media sent via ManyChat
 PUBLIC_MEDIA_BASE_URL = os.getenv('PUBLIC_MEDIA_BASE_URL', 'https://media.example.com')
+
+# Database Configuration
+DB_HOST = os.getenv('DB_HOST')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_NAME = os.getenv('DB_NAME')
+
+# CompraClick Configuration
+COMPRACLICK_EMAIL = os.getenv('COMPRACLICK_EMAIL')
+COMPRACLICK_PASSWORD = os.getenv('COMPRACLICK_PASSWORD')
+
+# BAC Banking Configuration
+BAC_USERNAME = os.getenv('BAC_USERNAME')
+BAC_PASSWORD = os.getenv('BAC_PASSWORD')

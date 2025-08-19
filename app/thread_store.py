@@ -39,6 +39,20 @@ def init_db():
             # Default to 0 (False), and ensure it's not NULL
             conn.execute("ALTER TABLE threads ADD COLUMN history_imported BOOLEAN DEFAULT 0 NOT NULL")
         except sqlite3.OperationalError: pass
+        
+        # --- Vertex AI Migration Schema ---
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN session_id TEXT")
+        except sqlite3.OperationalError: pass
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN vertex_migrated BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN migration_date TIMESTAMP")
+        except sqlite3.OperationalError: pass
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN vertex_context_injected BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError: pass
 
         # --- Data Backfill for Migrated Rows ---
         # Set default values for rows that existed before the migration.
@@ -81,3 +95,64 @@ def delete_old_threads(hours: int = 24):
     with get_conn() as conn:
         conn.execute("DELETE FROM threads WHERE last_updated < datetime('now', ?)", (f'-{hours} hours',))
         conn.commit()
+
+# Vertex AI Migration Helper Functions
+def get_session_id(wa_id: str) -> Optional[str]:
+    """Get Vertex session_id for a wa_id, fallback to thread_id if not migrated"""
+    thread_info = get_thread_id(wa_id)
+    if thread_info:
+        return thread_info.get('session_id') or thread_info.get('thread_id')
+    return None
+
+def set_session_id(wa_id: str, session_id: str, migrated: bool = False):
+    """Set Vertex session_id and optionally mark as migrated"""
+    with get_conn() as conn:
+        if migrated:
+            conn.execute("""
+                UPDATE threads 
+                SET session_id = ?, vertex_migrated = 1, migration_date = CURRENT_TIMESTAMP 
+                WHERE wa_id = ?
+            """, (session_id, wa_id))
+        else:
+            conn.execute("UPDATE threads SET session_id = ? WHERE wa_id = ?", (session_id, wa_id))
+        conn.commit()
+
+def mark_vertex_migrated(wa_id: str, session_id: str):
+    """Mark a conversation as successfully migrated to Vertex"""
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE threads 
+            SET session_id = ?, vertex_migrated = 1, migration_date = CURRENT_TIMESTAMP 
+            WHERE wa_id = ?
+        """, (session_id, wa_id))
+        conn.commit()
+
+def get_conversations_to_migrate(limit: int = 100) -> list:
+    """Get conversations that need migration to Vertex"""
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("""
+            SELECT wa_id, thread_id, created_at, history_imported 
+            FROM threads 
+            WHERE vertex_migrated = 0 OR vertex_migrated IS NULL
+            ORDER BY last_updated DESC
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_migration_stats():
+    """Get migration statistics"""
+    with get_conn() as conn:
+        cursor = conn.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN vertex_migrated = 1 THEN 1 ELSE 0 END) as migrated,
+                SUM(CASE WHEN vertex_migrated = 0 OR vertex_migrated IS NULL THEN 1 ELSE 0 END) as pending
+            FROM threads
+        """)
+        result = cursor.fetchone()
+        return {
+            'total': result[0],
+            'migrated': result[1], 
+            'pending': result[2]
+        }

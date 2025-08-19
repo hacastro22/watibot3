@@ -1,9 +1,8 @@
-"""
-Payment Proof Analysis Tool
+"""Payment Proof Analysis Tool
 
 This module provides functionality to analyze payment receipts (images/PDFs)
-using OpenAI's o4-mini multimodal model. It can identify CompraClick payment
-receipts or bank transfers and extract key information.
+using OpenAI's gpt-4o-mini or Vertex AI Gemini Vision based on USE_VERTEX_AI flag.
+It can identify CompraClick payment receipts or bank transfers and extract key information.
 
 Usage:
     result = await analyze_payment_proof(file_url)
@@ -14,12 +13,16 @@ import logging
 import base64
 import aiohttp
 import tempfile
+import time
 from typing import Optional, Dict, List, Any, Tuple
 from openai import AsyncOpenAI
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import io
 from PIL import Image
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part
+import vertexai.preview.generative_models as generative_models
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -31,6 +34,22 @@ MAX_PDF_PAGES = 5  # Reasonable limit for payment receipts
 
 # Initialize OpenAI client
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Import config for feature flag
+from . import config
+
+def _initialize_vertex_ai():
+    """Initialize Vertex AI for payment proof analysis"""
+    try:
+        if config.GOOGLE_APPLICATION_CREDENTIALS:
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = config.GOOGLE_APPLICATION_CREDENTIALS
+        
+        vertexai.init(project=config.GOOGLE_CLOUD_PROJECT_ID, location=config.VERTEX_AI_LOCATION)
+        logger.info(f"[PAYMENT_ANALYZER] Vertex AI initialized for payment analysis")
+        return True
+    except Exception as e:
+        logger.error(f"[PAYMENT_ANALYZER] Failed to initialize Vertex AI: {e}")
+        return False
 
 
 async def analyze_payment_proof(file_url: str) -> Dict[str, Any]:
@@ -94,8 +113,11 @@ async def analyze_payment_proof(file_url: str) -> Dict[str, Any]:
                     "error": f"Error encoding image: {str(e)}"
                 }
         
-        # Step 3: Send to OpenAI o4-mini for analysis
-        result = await analyze_with_o4_mini(image_data)
+        # Step 3: Send to AI model for analysis (OpenAI or Vertex AI based on feature flag)
+        if config.USE_VERTEX_AI:
+            result = await analyze_with_vertex_ai(image_data)
+        else:
+            result = await analyze_with_o4_mini(image_data)
         
         return result
         
@@ -394,4 +416,186 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
             "chain_of_thought": {},
             "extracted_info": {},
             "error": f"Error analyzing with AI model: {str(e)}"
+        }
+
+async def analyze_with_vertex_ai(image_data: List[Dict[str, str]]) -> Dict[str, Any]:
+    """
+    Analyzes images with Vertex AI Gemini Vision to extract payment information.
+    
+    Args:
+        image_data: List of dicts with base64 encoded images
+        
+    Returns:
+        dict: Analysis results with chain of thought for internal use.
+    """
+    if not image_data:
+        return {
+            "success": False,
+            "is_valid_receipt": False,
+            "receipt_type": "unknown",
+            "chain_of_thought": {},
+            "extracted_info": {},
+            "error": "No image data available for analysis"
+        }
+
+    try:
+        logger.info(f"[PAYMENT_ANALYZER] Using Vertex AI Gemini Vision for payment analysis")
+        
+        # Initialize Vertex AI
+        if not _initialize_vertex_ai():
+            raise Exception("Failed to initialize Vertex AI")
+        
+        # Initialize Gemini Vision model
+        model = GenerativeModel("gemini-2.5-pro")
+        
+        # Create system prompt with detailed instructions (same as OpenAI)
+        analysis_prompt = """You are a payment receipt analyzer. Your task is to analyze the provided image(s) to determine if they represent a valid payment receipt
+        for either a CompraClick transaction or a bank transfer.
+
+        **CRITICAL INSTRUCTIONS:**
+        1.  **YOUR ANALYSIS MUST BE BASED *EXCLUSIVELY* ON THE VISUAL DATA IN THE IMAGE.** Do NOT use any external information, context, or text from the user's conversation history. If a piece of information is not visibly present in the image, you must not include it. The authorization number, in particular, must be found under the "Autorización" label within the image itself.
+        2.  **Identify the receipt type:** "compraclick" or "bank_transfer".
+        3.  **Extract key information:** Amount, customer name, transaction ID (authorization # for CompraClick, reference # for bank transfer), and timestamp.
+        4.  **For CompraClick, the authorization number is explicitly labeled 'Autorización'.** Do not confuse it with the 'RECIBO' number or any other number.
+        5.  **For bank transfers, the target account must be '200252070'.** If it's different, it's not a valid receipt for us.
+        6.  **Provide a chain of thought** detailing your analysis steps.
+        7.  **Output a JSON object** with the specified format.
+
+        EXTRACTION REQUIREMENTS:
+
+        For CompraClick receipts, extract:
+        1. Amount paid (numeric value)
+        2. Customer name (if visible)
+        3. Authorization code (CRITICAL - MUST be labeled as "Autorización", "Authorization", "Auth Code", "Código de Autorización" or similar field name. DO NOT use "RECIBO" numbers, "ORDER" numbers, "TRANSACTION" numbers, or any other identifiers. If you cannot find a field specifically labeled as authorization/autorización, set is_valid_receipt to FALSE)
+        4. Transaction date/timestamp
+        5. Last 4 digits of credit card (if visible)
+        
+        VALIDATION RULES FOR COMPRACLICK:
+        - Receipt MUST contain the word "compraclick" or "CompraClick"
+        - Receipt MUST have a specific "Autorización" or "Authorization" field
+        - If only "RECIBO" numbers are present, mark as INVALID
+        - If no authorization field is found, mark as INVALID
+        
+        For bank transfers, extract:
+        1. Amount transferred (numeric value)
+        2. Sender/customer name
+        3. Transaction date (CRITICAL - required for validation, format as MM/DD/YYYY if possible)
+        4. Reference number (if available)
+        5. Confirmation that transfer was to account 200252070
+        
+        Return only a JSON response with the following structure. The 'chain_of_thought' is for internal analysis; DO NOT expose it to the end user:
+        {
+            "is_valid_receipt": boolean,
+            "receipt_type": "compraclick" or "bank_transfer" or "unknown",
+            "chain_of_thought": {
+                "steps": [
+                    {"step": 1, "action": "Image quality check", "reasoning": "Ensure image is readable", "result": "Clear/Blurry"},
+                    {"step": 2, "action": "Detect payment type", "reasoning": "Look for CompraClick or bank indicators", "result": "Found: [indicators]"},
+                    {"step": 3, "action": "Extract key information", "reasoning": "Identify required fields for validation", "result": "Extracted: [fields]"},
+                    {"step": 4, "action": "Authorization field validation", "reasoning": "For CompraClick: verify 'Autorización' field exists (not RECIBO)", "result": "Authorization field: Found/Missing"},
+                    {"step": 5, "action": "Validate completeness", "reasoning": "Check if all critical info is present", "result": "Complete/Missing: [details]"}
+                ],
+                "conclusion": "Receipt type identified with X% confidence"
+            },
+            "extracted_info": {
+                "amount": float,
+                "customer_name": string,
+                "transaction_id": string (authorization code for CompraClick, reference for bank),
+                "timestamp": string (date/time of transaction),
+                "additional_info": {
+                    "card_last_four": string (for CompraClick only),
+                    "target_account": string (for bank transfer only, should be "200252070")
+                }
+            },
+            "detection_confidence": float (0.0 to 1.0),
+            "detected_indicators": [list of indicators found that led to the classification],
+            "comments": string (any additional observations or potential issues)
+        }
+        
+        If the image quality is poor or critical information is missing, set is_valid_receipt to false
+        and explain in comments what information is missing or unclear.
+
+        Analyze this payment receipt and extract the key information based on the detection criteria."""
+        
+        # Convert image data to Vertex AI format
+        content_parts = [analysis_prompt]
+        
+        for img_dict in image_data:
+            # Extract base64 data from the data URL
+            image_url = img_dict.get("image_url", {}).get("url", "")
+            if "base64," in image_url:
+                base64_data = image_url.split("base64,")[1]
+                image_part = Part.from_data(
+                    data=base64.b64decode(base64_data),
+                    mime_type="image/jpeg"
+                )
+                content_parts.append(image_part)
+        
+        # Generate response with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(
+                    content_parts,
+                    generation_config=generative_models.GenerationConfig(
+                        max_output_tokens=2048,
+                        temperature=0.1,  # Low temperature for consistent analysis
+                        top_p=0.8,
+                        top_k=40
+                    ),
+                    safety_settings={
+                        generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    }
+                )
+                
+                if response.candidates and response.candidates[0].content.parts:
+                    result_text = response.candidates[0].content.parts[0].text
+                    
+                    # Clean up response to extract JSON
+                    result_text = result_text.strip()
+                    if result_text.startswith('```json'):
+                        result_text = result_text[7:-3].strip()
+                    elif result_text.startswith('```'):
+                        lines = result_text.split('\n')
+                        result_text = '\n'.join(lines[1:-1])
+                    
+                    # Parse and validate JSON
+                    parsed_result = json.loads(result_text)
+                    
+                    # Add success field and ensure structure
+                    parsed_result["success"] = True
+                    parsed_result.setdefault("is_valid_receipt", False)
+                    parsed_result.setdefault("receipt_type", "unknown")
+                    parsed_result.setdefault("chain_of_thought", {})
+                    parsed_result.setdefault("extracted_info", {})
+                    parsed_result.setdefault("error", "")
+                    
+                    logger.info(f"[PAYMENT_ANALYZER] Vertex AI analysis successful")
+                    return parsed_result
+                else:
+                    raise Exception("No response candidates generated")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"[PAYMENT_ANALYZER] Vertex AI attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise
+        
+        raise Exception("Max retries exceeded")
+        
+    except Exception as e:
+        logger.error(f"[PAYMENT_ANALYZER] Vertex AI analysis failed: {e}")
+        # Return fallback result
+        return {
+            "success": False,
+            "is_valid_receipt": False,
+            "receipt_type": "unknown",
+            "chain_of_thought": {},
+            "extracted_info": {},
+            "error": f"Vertex AI analysis failed: {str(e)}"
         }

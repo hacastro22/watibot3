@@ -11,8 +11,9 @@ from . import compraclick_tool
 from . import payment_proof_analyzer
 from app import bank_transfer_tool
 from app import bank_transfer_retry
-from app import booking_tool, email_service
-from app.booking_tool import process_pending_booking_if_needed
+from app import email_service
+# booking_tool imported locally to avoid circular dependency
+# Import moved to avoid circular dependency - imported locally where needed
 from app import smart_availability
 from app import office_status_tool
 from app import config
@@ -857,7 +858,7 @@ available_functions = {
     "start_bank_transfer_retry_process": bank_transfer_retry.start_bank_transfer_retry_process,
     "mark_customer_frustrated": bank_transfer_retry.mark_customer_frustrated,
     "trigger_compraclick_retry_for_missing_payment": compraclick_tool.trigger_compraclick_retry_for_missing_payment,
-    "make_booking": booking_tool.make_booking,
+    "make_booking": lambda *args, **kwargs: __import__('app.booking_tool', fromlist=['make_booking']).make_booking(*args, **kwargs),
     "send_email": email_service.send_email,
 }
 
@@ -946,6 +947,7 @@ async def get_openai_response(
     # Check for PENDING bookings that need processing
     if phone_number:
         try:
+            from app.booking_tool import process_pending_booking_if_needed
             pending_result = await process_pending_booking_if_needed(phone_number, message)
             if pending_result:
                 logger.info(f"Processed PENDING booking for {phone_number}: {pending_result}")

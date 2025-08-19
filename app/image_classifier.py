@@ -1,24 +1,43 @@
-"""
-Contextual Image Classifier
+"""Contextual Image Classifier
 
 This module provides functionality to classify uploaded images based on both
 image content and conversation context to determine if they are payment proofs
 or other types of images.
 
-Uses the same gpt-4o-mini model as the payment proof analyzer for consistency.
+Supports both OpenAI gpt-4o-mini and Vertex AI Gemini Vision based on USE_VERTEX_AI flag.
 """
 import os
 import json
 import logging
 import base64
+import time
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part
+import vertexai.preview.generative_models as generative_models
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
+# Initialize clients
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Import config for feature flag
+from . import config
+
+def _initialize_vertex_ai():
+    """Initialize Vertex AI for vision processing"""
+    try:
+        if config.GOOGLE_APPLICATION_CREDENTIALS:
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = config.GOOGLE_APPLICATION_CREDENTIALS
+        
+        vertexai.init(project=config.GOOGLE_CLOUD_PROJECT_ID, location=config.VERTEX_AI_LOCATION)
+        logger.info(f"[IMAGE_CLASSIFIER] Vertex AI initialized for vision processing")
+        return True
+    except Exception as e:
+        logger.error(f"[IMAGE_CLASSIFIER] Failed to initialize Vertex AI: {e}")
+        return False
 
 async def classify_image_with_context(
     image_path: str, 
@@ -121,18 +140,21 @@ async def classify_image_with_context(
             }
         ]
 
-        # Step 4: Call OpenAI API
-        logger.info(f"[IMAGE_CLASSIFIER] Calling OpenAI API for classification")
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=1024
-        )
+        # Step 4: Call AI API (OpenAI or Vertex AI based on feature flag)
+        if config.USE_VERTEX_AI:
+            result_text = await _classify_with_vertex_ai(img_base64, classification_prompt)
+        else:
+            logger.info(f"[IMAGE_CLASSIFIER] Calling OpenAI API for classification")
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=1024
+            )
+            result_text = response.choices[0].message.content
 
         # Step 5: Parse and validate response
         try:
-            result_text = response.choices[0].message.content
             parsed_result = json.loads(result_text)
             
             # Validate and set defaults
@@ -255,3 +277,95 @@ async def get_conversation_context(wa_id: str, max_messages: int = 5) -> str:
     except Exception as e:
         logger.exception(f"[IMAGE_CLASSIFIER] Error getting conversation context: {str(e)}")
         return f"Error accessing conversation context: {str(e)}"
+
+async def _classify_with_vertex_ai(img_base64: str, classification_prompt: str) -> str:
+    """
+    Classify image using Vertex AI Gemini Vision model
+    
+    Args:
+        img_base64: Base64 encoded image data
+        classification_prompt: Classification prompt text
+        
+    Returns:
+        JSON string with classification results
+    """
+    try:
+        logger.info(f"[IMAGE_CLASSIFIER] Using Vertex AI Gemini Vision for classification")
+        
+        # Initialize Vertex AI
+        if not _initialize_vertex_ai():
+            raise Exception("Failed to initialize Vertex AI")
+        
+        # Initialize Gemini Vision model
+        model = GenerativeModel("gemini-2.5-pro")
+        
+        # Create image part from base64 data
+        image_part = Part.from_data(
+            data=base64.b64decode(img_base64),
+            mime_type="image/jpeg"
+        )
+        
+        # Create the full prompt
+        full_prompt = f"{classification_prompt}\n\nPlease classify this image based on the content and conversation context provided."
+        
+        # Generate response with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(
+                    [full_prompt, image_part],
+                    generation_config=generative_models.GenerationConfig(
+                        max_output_tokens=1024,
+                        temperature=0.1,  # Low temperature for consistent classification
+                        top_p=0.8,
+                        top_k=40
+                    ),
+                    safety_settings={
+                        generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                        generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    }
+                )
+                
+                if response.candidates and response.candidates[0].content.parts:
+                    result_text = response.candidates[0].content.parts[0].text
+                    
+                    # Clean up response to extract JSON
+                    result_text = result_text.strip()
+                    if result_text.startswith('```json'):
+                        result_text = result_text[7:-3].strip()
+                    elif result_text.startswith('```'):
+                        lines = result_text.split('\n')
+                        result_text = '\n'.join(lines[1:-1])
+                    
+                    # Validate it's proper JSON
+                    json.loads(result_text)  # This will raise an exception if not valid JSON
+                    
+                    logger.info(f"[IMAGE_CLASSIFIER] Vertex AI classification successful")
+                    return result_text
+                else:
+                    raise Exception("No response candidates generated")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"[IMAGE_CLASSIFIER] Vertex AI attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise
+        
+        raise Exception("Max retries exceeded")
+        
+    except Exception as e:
+        logger.error(f"[IMAGE_CLASSIFIER] Vertex AI classification failed: {e}")
+        # Return fallback classification
+        return json.dumps({
+            "classification": "unknown",
+            "confidence": 0.0,
+            "reasoning": f"Vertex AI classification failed: {str(e)}",
+            "visual_indicators": [],
+            "context_indicators": [],
+            "should_analyze_as_payment": False,
+            "suggested_response": "Process as general image due to classification error"
+        })

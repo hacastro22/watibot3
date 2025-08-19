@@ -26,6 +26,64 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+def get_agent_for_conversation():
+    """
+    Routes to OpenAI or Vertex agent based on feature flag.
+    Zero-downtime migration switch controlled by USE_VERTEX_AI environment variable.
+    """
+    if config.USE_VERTEX_AI:
+        # Import vertex_agent only when needed to avoid dependency issues during development
+        try:
+            from . import vertex_agent
+            return vertex_agent
+        except ImportError:
+            logger.warning("[MIGRATION] vertex_agent not available, falling back to OpenAI")
+            return openai_agent
+    else:
+        return openai_agent
+
+def get_image_classifier():
+    """
+    Routes to OpenAI or Vertex image classifier based on feature flag.
+    """
+    if config.USE_VERTEX_AI:
+        try:
+            from . import vertex_image_classifier
+            return vertex_image_classifier
+        except ImportError:
+            logger.warning("[MIGRATION] vertex_image_classifier not available, falling back to OpenAI")
+            return image_classifier
+    else:
+        return image_classifier
+
+def get_payment_proof_analyzer():
+    """
+    Routes to OpenAI or Vertex payment proof analyzer based on feature flag.
+    """
+    if config.USE_VERTEX_AI:
+        try:
+            from . import vertex_payment_proof_analyzer
+            return vertex_payment_proof_analyzer
+        except ImportError:
+            logger.warning("[MIGRATION] vertex_payment_proof_analyzer not available, falling back to OpenAI")
+            return payment_proof_tool
+    else:
+        return payment_proof_tool
+
+def get_whisper_client():
+    """
+    Routes to OpenAI Whisper or Google Speech-to-Text based on feature flag.
+    """
+    if config.USE_VERTEX_AI:
+        try:
+            from . import vertex_whisper_client
+            return vertex_whisper_client
+        except ImportError:
+            logger.warning("[MIGRATION] vertex_whisper_client not available, falling back to OpenAI Whisper")
+            return whisper_client
+    else:
+        return whisper_client
  
 # Serve static media for ManyChat via /pictures/ and /files/
 try:
@@ -67,7 +125,8 @@ async def process_image_message(wa_id: str, file_path: str) -> str:
         
         logger.info(f"[PROCESS_IMAGE] Image downloaded to temp file: {tmpfile_path} for {wa_id}")
 
-        classification_result = await image_classifier.classify_image_with_context(
+        classifier = get_image_classifier()
+        classification_result = await classifier.classify_image_with_context(
             image_path=tmpfile_path,
             conversation_context=None,  # Context is handled by the agent, not here
             wa_id=wa_id
@@ -78,7 +137,8 @@ async def process_image_message(wa_id: str, file_path: str) -> str:
         logger.info(f"[PROCESS_IMAGE] Classification for {wa_id}: {classification} (Confidence: {confidence})")
 
         if classification == 'payment_proof' and confidence >= 0.8:
-            analysis_result = await payment_proof_tool.analyze_payment_proof(tmpfile_path)
+            analyzer = get_payment_proof_analyzer()
+            analysis_result = await analyzer.analyze_payment_proof(tmpfile_path)
             return f"(User sent a payment proof. Analysis result: {analysis_result})"
         else:
             return f"(User sent an image of type '{classification}')"
@@ -111,7 +171,8 @@ async def process_audio_message(file_path: str) -> str:
                 tmpfile.write(response.content)
                 tmpfile_path = tmpfile.name
 
-        transcription = await whisper_client.transcribe_audio_opus(tmpfile_path)
+        whisper = get_whisper_client()
+        transcription = await whisper.transcribe_audio_opus(tmpfile_path)
         return f'(User sent a voice note: "{transcription}")'
 
     except Exception as e:
@@ -152,7 +213,8 @@ async def process_manychat_audio_message(url: str) -> str:
                 tmpfile_path = tmpfile.name
 
         # Reuse whisper client (ffmpeg -i works for mp4/m4a/aac/ogg/etc.)
-        transcription = await whisper_client.transcribe_audio_opus(tmpfile_path)
+        whisper = get_whisper_client()
+        transcription = await whisper.transcribe_audio_opus(tmpfile_path)
         return f'(User sent a voice note: "{transcription}")'
 
     except Exception:
@@ -183,7 +245,8 @@ async def process_manychat_image_message(url: str) -> str:
                 tmpfile.write(response.content)
                 tmpfile_path = tmpfile.name
 
-        classification_result = await image_classifier.classify_image_with_context(
+        classifier = get_image_classifier()
+        classification_result = await classifier.classify_image_with_context(
             image_path=tmpfile_path,
             conversation_context=None,
             wa_id="manychat",  # Identifier only; not used by classifier
@@ -193,7 +256,8 @@ async def process_manychat_image_message(url: str) -> str:
         logger.info(f"[PROCESS_IMAGE_MC] Classification: {classification} (Confidence: {confidence})")
 
         if classification == 'payment_proof' and confidence >= 0.8:
-            analysis_result = await payment_proof_tool.analyze_payment_proof(tmpfile_path)
+            analyzer = get_payment_proof_analyzer()
+            analysis_result = await analyzer.analyze_payment_proof(tmpfile_path)
             return f"(User sent a payment proof. Analysis result: {analysis_result})"
         else:
             return f"(User sent an image of type '{classification}')"
@@ -573,10 +637,11 @@ def timer_callback(wa_id):
             elapsed = time.time() - start_time
             
             try:
-                logger.info(f"[BUFFER] Attempt {attempt} to get OpenAI response for {wa_id} (elapsed: {elapsed:.1f}s)")
+                agent = get_agent_for_conversation()
+                logger.info(f"[BUFFER] Attempt {attempt} to get response for {wa_id} (elapsed: {elapsed:.1f}s) using {agent.__name__}")
                 aio_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(aio_loop)
-                ai_response, new_thread_id = aio_loop.run_until_complete(openai_agent.get_openai_response(prompt, thread_id, wa_id))
+                ai_response, new_thread_id = aio_loop.run_until_complete(agent.get_openai_response(prompt, thread_id, wa_id))
                 aio_loop.close()
                 logger.info(f"[BUFFER] OpenAI response for {wa_id}: {ai_response!r}")
                 
@@ -715,11 +780,12 @@ def manychat_timer_callback(conversation_id: str, channel: str, user_id: str):
         thread_info = thread_store.get_thread_id(conversation_id)
         thread_id = thread_info['thread_id'] if thread_info else None
 
-        # Call OpenAI agent to get response (no phone_number for ManyChat)
+        # Call agent to get response (routes to OpenAI or Vertex based on feature flag)
+        agent = get_agent_for_conversation()
         aio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(aio_loop)
         ai_response, new_thread_id = aio_loop.run_until_complete(
-            openai_agent.get_openai_response(
+            agent.get_openai_response(
                 prompt,
                 thread_id,
                 None,  # phone_number not used for ManyChat
