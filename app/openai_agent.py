@@ -1197,8 +1197,29 @@ async def get_openai_response(
             elif status in ("failed", "cancelled", "expired"):
                 error_info = run_data.get('last_error')
                 logger.error(f"Run failed with status: {status}. Details: {error_info}")
-                # Create a NEW run in the SAME thread to preserve conversation context
+                
+                # Check for existing active runs before creating new one to prevent race condition
                 try:
+                    logger.info(f"Checking for existing runs in thread {thread_id} before creating new run...")
+                    runs_resp = await client.get(f"{OPENAI_API_BASE}/threads/{thread_id}/runs", headers=headers)
+                    runs_resp.raise_for_status()
+                    runs_data = runs_resp.json()
+                    
+                    # Check if there are any active/pending runs
+                    active_runs = [r for r in runs_data.get('data', []) if r.get('status') in ('queued', 'in_progress', 'requires_action')]
+                    if active_runs:
+                        logger.warning(f"Found {len(active_runs)} active runs in thread {thread_id}, cancelling them first...")
+                        for active_run in active_runs:
+                            try:
+                                cancel_resp = await client.post(f"{OPENAI_API_BASE}/threads/{thread_id}/runs/{active_run['id']}/cancel", headers=headers)
+                                logger.info(f"Cancelled run {active_run['id']}")
+                            except Exception as cancel_e:
+                                logger.warning(f"Failed to cancel run {active_run['id']}: {cancel_e}")
+                        
+                        # Wait a moment for cancellations to process
+                        await asyncio.sleep(2)
+                    
+                    # Create a NEW run in the SAME thread to preserve conversation context
                     logger.info(f"Recreating run in existing thread {thread_id} after status '{status}'...")
                     new_run_payload = {
                         "assistant_id": config.OPENAI_AGENT_ID,
@@ -1211,9 +1232,21 @@ async def get_openai_response(
                     run_id = new_run_id
                     run_start_time = asyncio.get_event_loop().time()  # Reset timeout for new run
                     continue
+                    
                 except Exception as e:
-                    logger.exception("Failed to create new run after failure; retrying in 10 seconds...")
-                    await asyncio.sleep(10)
+                    # Exponential backoff for retries to prevent infinite loops
+                    retry_attempts = getattr(self, '_run_retry_attempts', 0)
+                    max_retries = 5
+                    
+                    if retry_attempts >= max_retries:
+                        logger.error(f"Max retry attempts ({max_retries}) reached for run recovery, giving up")
+                        raise Exception(f"Failed to recover from run failure after {max_retries} attempts: {e}")
+                    
+                    self._run_retry_attempts = retry_attempts + 1
+                    backoff_time = min(10 * (2 ** retry_attempts), 60)  # Exponential backoff, max 60s
+                    
+                    logger.exception(f"Failed to create new run after failure (attempt {retry_attempts + 1}/{max_retries}); retrying in {backoff_time} seconds...")
+                    await asyncio.sleep(backoff_time)
                     continue
             
             await asyncio.sleep(1)

@@ -148,8 +148,12 @@ Migrate from OpenAI Assistant API to Vertex AI Gemini 2.5 Pro with Agent Engine 
 
 #### Critical Business Logic & Error Handling
 - [ ] **Implement Critical Business Logic**: Re-implement the complete retry, timeout, and escalation logic from `app/main.py` and `app/openai_agent.py` into the new `vertex_agent.py`
-- [ ] **Fix Race Conditions**: Address the 5-minute timeout race condition bug from `openai_agent.py` (lines 1185-1207) where `start_time` is not reset after successful recovery
-- [ ] **Timeout Recovery Logic**: Implement equivalent 15-minute escalation logic with exponential backoff for Vertex sessions
+- [ ] **Replicate Fixed Timeout Logic**: Implement the corrected timeout recovery patterns from `openai_agent.py` including:
+  - [ ] Proper `run_start_time` reset after successful run creation
+  - [ ] Exponential backoff for retry attempts (2^n * 10 seconds, max 60s)
+  - [ ] Maximum retry limits (5 attempts) to prevent infinite loops
+  - [ ] Robust error handling with graceful failure after max retries
+- [ ] **Timeout Recovery Logic**: Implement equivalent 15-minute escalation logic with the corrected exponential backoff patterns from the fixed OpenAI implementation
 - [ ] **Tool Identifier Injection**: Design and implement mechanism to pass routing identifiers (`phone_number`, `wa_id`, `subscriber_id`, `channel`) to Vertex tool calls for functions like `get_conversation_snippets` and `validate_bank_transfer`
 - [ ] Build session state management and recovery mechanisms
 - [ ] Create rate limiting and exponential backoff systems
