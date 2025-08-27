@@ -1,0 +1,300 @@
+============================================================
+OPENAI THREAD INSPECTION
+============================================================
+Thread ID: thread_JD7TW9uQUBzi6Es6Oo3SZNxY
+
+Total messages in thread: 20
+
+INVESTIGATING JULY 31ST CONTEXT INJECTION FOR LINDA
+Was July 25th booking conversation injected when Linda contacted assistant?
+============================================================
+
+ALL MESSAGE TIMESTAMPS IN THREAD:
+----------------------------------------
+Message #1: 2025-08-20 12:45:17
+Message #2: 2025-08-20 12:45:25
+Message #3: 2025-08-20 12:55:52
+Message #4: 2025-08-20 12:56:54
+Message #5: 2025-08-20 12:56:55
+Message #6: 2025-08-20 12:57:13
+Message #7: 2025-08-20 12:59:16
+Message #8: 2025-08-20 13:00:22
+Message #9: 2025-08-20 13:00:39
+Message #10: 2025-08-20 13:02:41
+Message #11: 2025-08-20 13:04:14
+Message #12: 2025-08-20 13:04:23
+Message #13: 2025-08-20 13:09:26
+Message #14: 2025-08-20 13:10:28
+Message #15: 2025-08-20 13:11:10
+Message #16: 2025-08-20 13:44:18
+Message #17: 2025-08-20 13:45:22
+Message #18: 2025-08-20 13:45:34
+Message #19: 2025-08-20 13:47:38
+Message #20: 2025-08-20 13:48:42
+
+UNIQUE DATES IN THREAD: ['2025-08-20']
+JULY 31ST INJECTIONS FOUND: 0
+JULY 25TH MENTIONS FOUND: 0
+
+============================================================
+ANALYZING JULY 31ST CONTEXT INJECTIONS
+Looking for July 25th booking context in July 31st injections...
+============================================================
+
+❌ NO JULY 31ST MESSAGES FOUND IN THREAD
+This suggests Linda's July 31st message may not have triggered context injection
+MESSAGE #1 - 2025-08-20 12:45:17 (USER)
+ID: msg_okvwJ1jUH95XBtNsw9VKqsX8
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 06:45. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 06:45. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #3 - 2025-08-20 12:55:52 (USER)
+ID: msg_ysltW06CDOw9la8K6h7e5MD0
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: Son 2 niño de  8 y 10
+
+--- Conversación 2 ---
+Cliente: Gracias, en unos momentos responderemos a su pregunta
+Cliente: Hola mi nombre es Valeria Mendoza, yo soy el asistente virtual de Las Hojas Resort & Beach Club. ¿En qué puedo ayudarle?
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #4 - 2025-08-20 12:56:54 (USER)
+ID: msg_0YOYE5ckKKZEdgyxvQmbg5Eh
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: Y son 6 adultos
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #5 - 2025-08-20 12:56:55 (USER)
+ID: msg_2u62D0fhMGshmlg4XP67DYcj
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 06:56. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 06:56. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #7 - 2025-08-20 12:59:16 (USER)
+ID: msg_3MFRCsqZeY4gpNQS64maiBM2
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: 3 noches pero en pesando hoy
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #8 - 2025-08-20 13:00:22 (USER)
+ID: msg_cFqeIobFxW35ysWLXD7cbAbL
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:00. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:00. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #10 - 2025-08-20 13:02:41 (USER)
+ID: msg_vXLGwO4Uq8JA0JMYYtQVz1m9
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: Me puede detallar los paquetes por favor
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #11 - 2025-08-20 13:04:14 (USER)
+ID: msg_feYHc1rYhSyLmApl6ch0IikJ
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:03. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:03. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #13 - 2025-08-20 13:09:26 (USER)
+ID: msg_cOieMMW5lq7PE2qiMtGFwKr6
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: Me puede cotizar el primero y el segundo por favor
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #14 - 2025-08-20 13:10:28 (USER)
+ID: msg_1NqJHNYNWznjS9nZ6HMAorQq
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:10. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:10. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #15 - 2025-08-20 13:11:10 (ASSISTANT)
+ID: msg_oVBLwFSAbWUbJGmkR3vdWl9L
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+¡Gracias por su paciencia! 🌴 Le presento la cotización para su grupo de 6 adultos y 2 niños (de 8 y 10 años) para 3 noches (del 20 al 23 de agosto), en los dos paquetes que solicitó:
+
+Horarios importantes para su estadía: 🕐
+• Puede disfrutar piscinas y playa desde las 7:00 a.m. del día de llegada
+• La entrega de las habitaciones es entre 4:00-5:00 p.m.
+• El día de salida debe entregar las llaves a las 2:00 p.m.
+• Puede seguir usando las instalaciones hasta las 9:00 p.m.
+
+---
+
+Opción 1: Paquete Las Hojas
+
+Incluye: cena, desayuno, almuerzo, 6 bebidas, 2 postres por persona y alojamiento.
+
+Cotización:
+- Noche 1 y 2 (20 y 21 de agosto): 6 adultos x $59 + 2 niños x $29.50 = $413.00 por noche
+- Noche 3 (22 de agosto): 6 adultos x $69 + 2 niños x $34.50 = $477.00
+
+Total a pagar: ($413.00 x 2) + $477.00 = $1,303.00
+
+---
+
+Opción 2: Paquete Escapadita
+
+Incluye: cena, desayuno, 3 bebidas, 1 postre por persona y alojamiento.
+
+Cotización:
+- Noche 1 y 2 (20 y 21 de agosto): 6 adultos x $54 + 2 niños x $27 = $378.00 por noche
+- Noche 3 (22 de agosto): 6 adultos x $64 + 2 niños x $32 = $448.00
+
+Total a pagar: ($378.00 x 2) + $448.00 = $1,204.00
+
+---
+
+Le informo que estas tarifas son las vigentes al momento de su consulta y están sujetas a cambios. Le recomendamos realizar su reserva lo antes posible para garantizar este precio. Nuestra disponibilidad cambia constantemente, así que si le interesa alguna opción, podemos avanzar con la reserva de inmediato. ☀️
+
+¿Le gustaría que avancemos con alguno de estos paquetes? ¿Prefiere el Bungalow Familiar, Junior o habitaciones dobles? ¡Quedo atenta para ayudarle! 😊
+----------------------------------------
+
+MESSAGE #16 - 2025-08-20 13:44:18 (USER)
+ID: msg_uFLXplxVhZAHPNj4p86OhWoC
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: Me gustaría el paquete #1 el pago total es de 1,303 00
+
+--- Conversación 2 ---
+Cliente: ¡Gracias por comunicarte con nosotros! Te informamos que, por razones de tiempo, este chat se cerrará pronto. Si necesitas más ayuda, no dudes en iniciar una nueva conversación. ¡Estamos aquí para ayudarte!
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #17 - 2025-08-20 13:45:22 (USER)
+ID: msg_9hBlKUahXSChWoeHV0rBdnJx
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:45. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:45. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+MESSAGE #18 - 2025-08-20 13:45:34 (ASSISTANT)
+ID: msg_AJcXmpEHjly8xK4cxpoYx0gV
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+¡Perfecto! 🌴 Ya tenemos confirmada su preferencia por el Paquete Las Hojas para 6 adultos y 2 niños, por 3 noches, con un total de $1,303.00.
+
+Antes de proceder con el pago, solo necesito recopilar unos datos esenciales para su reserva:
+
+- Nombre completo de la persona a quien quedará la reserva
+- Número de DUI o pasaporte de esa persona
+- Un correo electrónico para enviarle la confirmación
+
+Una vez que tengamos estos datos, le generaré el enlace de pago seguro para completar su reserva y asegurar su espacio. 😊
+
+¡Quedo atenta para avanzar! ¿Hay algún detalle especial que desee agregar a su estadía?
+----------------------------------------
+
+MESSAGE #19 - 2025-08-20 13:47:38 (USER)
+ID: msg_AoWCzxuyw255ABhpyrora4Y8
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+=== CONVERSACIONES CON AGENTES HUMANOS ===
+El siguiente historial muestra conversaciones previas entre el cliente y agentes humanos de Las Hojas Resort.
+Esta información te ayudará a brindar un mejor servicio al cliente.
+
+--- Conversación 1 ---
+Cliente: No solo saver si el pago es extamente los 1,303.00
+
+=== FIN DEL HISTORIAL DE AGENTES ===
+Usa esta información como contexto adicional para ayudar mejor al cliente.
+No menciones explícitamente que tienes acceso a estas conversaciones previas.
+----------------------------------------
+
+MESSAGE #20 - 2025-08-20 13:48:42 (USER)
+ID: msg_UEB8YADlh2znvgqd0JL9ev8C
+*** AGENT CONTEXT INJECTION FOUND ***
+CONTENT:
+----------------------------------------
+The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:48. The current date, day, and time in El Salvador (GMT-6) is Wednesday, 2025-08-20, 07:48. CRITICAL Booking Workflow: 1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). 2. **Payment**: - For CompraClick: Create a payment link using `create_compraclick_link`. - For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. 3. **Payment Verification (Sync -> Validate -> Book)**: - When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. **CRITICAL CompraClick Proof Distinction**: - INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). - VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. - If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. - If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. - If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. **CRITICAL Payment Method Consistency**: - Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that m
+... (truncated)
+----------------------------------------
+
+✅ AGENT CONTEXT INJECTION FOUND in thread
+============================================================
+INSPECTION COMPLETE
+============================================================
