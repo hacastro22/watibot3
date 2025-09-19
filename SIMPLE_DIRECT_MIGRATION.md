@@ -231,13 +231,17 @@ response = await openai_client.responses.create(
     model="gpt-5",
     conversation=conversation_id,
     input=[
-        {"type": "message", "role": "system", "content": system_instructions},
-        {"type": "message", "role": "user", "content": contextualized_message}
+        {"role": "system", "content": system_instructions},
+        {"role": "user", "content": contextualized_message}
     ],
-    tools=tools_list,
-    tool_choice="auto"
+    tools=tools_list
 )
 ```
+
+**CRITICAL: Responses API uses different response structure**
+- **NO `.choices` attribute**
+- Use `response.output_text` for plain text
+- Use `response.output` array for items (including tool calls)
 
 **Remove (lines ~1036-1180 - Entire polling loop):**
 ```python
@@ -253,39 +257,49 @@ while run.status in ("queued", "in_progress", "requires_action"):
 **Location:** Replace lines ~1036-1180 (old polling loop)
 **Add:**
 ```python
-# Check if response requires tool execution
-if response.choices[0].message.tool_calls:
+# Check if response contains tool calls (NEW FORMAT)
+tool_calls_found = False
+for item in response.output or []:
+    if item.type == "tool_call":
+        tool_calls_found = True
+        break
+
+if tool_calls_found:
     tool_outputs = []
     
-    for tool_call in response.choices[0].message.tool_calls:
-        function_name = tool_call.function.name
-        function_args = json.loads(tool_call.function.arguments)
-        
-        logger.info(f"[Tool] Executing {function_name}")
-        
-        # Keep ALL existing tool execution logic from lines ~1100-1150
-        # Just change how we get tool_call info
-        
-        # Execute tool (preserve existing logic)
-        if function_name == "check_room_availability":
-            # ... existing implementation ...
-        elif function_name == "create_booking":
-            # ... existing implementation ...
-        # ... all 22 tools ...
-        
-        tool_outputs.append({
-            "tool_call_id": tool_call.id,
-            "output": json.dumps(result)
-        })
+    # Iterate through output items to find tool calls
+    for item in response.output or []:
+        if item.type == "tool_call":
+            for tool_call in item.tool_calls:
+                function_name = tool_call.name  # Direct access, not .function.name
+                function_args = json.loads(tool_call.arguments)  # JSON string
+                tool_call_id = tool_call.id
+                
+                logger.info(f"[Tool] Executing {function_name}")
+                
+                # Keep ALL existing tool execution logic from lines ~1100-1150
+                # Just change how we get tool_call info
+                
+                # Execute tool (preserve existing logic)
+                if function_name == "check_room_availability":
+                    # ... existing implementation ...
+                elif function_name == "create_booking":
+                    # ... existing implementation ...
+                # ... all 22 tools ...
+                
+                tool_outputs.append({
+                    "tool_call_id": tool_call_id,
+                    "output": json.dumps(result)
+                })
     
-    # Submit tool outputs (new API call instead of /submit_tool_outputs)
-    response = await openai_client.responses.create(
-        model="gpt-5",
-        conversation=conversation_id,
-        input=[
-            {"type": "tool_outputs", "tool_outputs": tool_outputs}
-        ]
+    # Submit tool outputs using submit_tool_outputs (NOT new response call)
+    await openai_client.responses.submit_tool_outputs(
+        response_id=response.id,
+        tool_outputs=tool_outputs
     )
+    
+    # Get final response after tool execution
+    response = await openai_client.responses.retrieve(response_id=response.id)
 ```
 
 ### 4. Extract Final Response
@@ -310,28 +324,34 @@ if run.status == "completed":
 
 **Replace with:**
 ```python
-# Extract response from Responses API
+# Extract response from Responses API (NO .choices!)
 final_response = ""
-if response.choices and response.choices[0].message:
-    final_response = response.choices[0].message.content or ""
+if hasattr(response, 'output_text') and response.output_text:
+    final_response = response.output_text
+else:
+    # Fallback: iterate through output items for text
+    for item in response.output or []:
+        if item.type == "message" and hasattr(item, 'content'):
+            final_response = item.content
+            break
     
-    # Apply JSON guard (preserve from memory)
-    if final_response and len(final_response) < 200:
-        try:
-            parsed = json.loads(final_response)
-            if any(k in str(parsed).lower() for k in ['function', 'arguments', 'name']):
-                logger.info("[JSON_GUARD] Detected tool-like JSON, repairing")
-                repair_response = await openai_client.responses.create(
-                    model="gpt-5",
-                    conversation=conversation_id,
-                    input=[
-                        {"type": "message", "role": "system", "content": "Generate a user-friendly Spanish message."},
-                        {"type": "message", "role": "user", "content": f"Convert to natural Spanish: {final_response}"}
-                    ]
-                )
-                final_response = repair_response.choices[0].message.content
-        except:
-            pass  # Not JSON, use as-is
+# Apply JSON guard (preserve from memory)
+if final_response and len(final_response) < 200:
+    try:
+        parsed = json.loads(final_response)
+        if any(k in str(parsed).lower() for k in ['function', 'arguments', 'name']):
+            logger.info("[JSON_GUARD] Detected tool-like JSON, repairing")
+            repair_response = await openai_client.responses.create(
+                model="gpt-5",
+                conversation=conversation_id,
+                input=[
+                    {"role": "system", "content": "Generate a user-friendly Spanish message."},
+                    {"role": "user", "content": f"Convert to natural Spanish: {final_response}"}
+                ]
+            )
+            final_response = repair_response.output_text or final_response
+    except:
+        pass  # Not JSON, use as-is
 ```
 
 ### 5. Update Error Handling
@@ -364,8 +384,8 @@ except Exception as e:
             model="gpt-5",
             conversation=conversation_id,
             input=[
-                {"type": "message", "role": "system", "content": system_instructions},
-                {"type": "message", "role": "user", "content": contextualized_message}
+                {"role": "system", "content": system_instructions},
+                {"role": "user", "content": contextualized_message}
             ],
             tools=tools_list
         )
@@ -374,7 +394,7 @@ except Exception as e:
         return "Lo siento, ocurrió un error. Por favor intenta de nuevo."
 ```
 
-### 6. Remove Unused Imports and Constants
+### 6. Remove Unused Imports and Add DateTime Parser
 
 **File:** `app/openai_agent.py`
 **Location:** Lines 1-50 (top of file)
@@ -388,6 +408,25 @@ OPENAI_AGENT_ID = config.OPENAI_AGENT_ID  # Delete
 OPENAI_PROMPT_ID = config.OPENAI_PROMPT_ID  # Delete if exists
 ```
 
+**Add (for WATI datetime parsing):**
+```python
+import re
+
+def parse_wati_iso(s: str) -> datetime:
+    """Parse WATI ISO datetime strings that may have incomplete microseconds."""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?$", s)
+    if not m:
+        # try as epoch seconds (WATI also gives 'timestamp': '1749506880')
+        if s.isdigit():
+            return datetime.fromtimestamp(int(s))
+        raise ValueError(f"Unrecognized datetime '{s}'")
+    base, frac = m.groups()
+    if frac is None:
+        return datetime.fromisoformat(base)
+    frac = (frac + "000000")[:6]  # pad/truncate to 6 digits
+    return datetime.fromisoformat(f"{base}.{frac}")
+```
+
 **Keep:**
 ```python
 # KEEP THESE:
@@ -397,16 +436,66 @@ import asyncio
 from datetime import datetime
 from pytz import timezone
 # ... all other necessary imports for tools ...
-    order="desc",  # or "asc"
-    include=["message.output_text.logprobs"]  # Optional includes
+```
+
+**Replace all `datetime.fromisoformat(created)` with `parse_wati_iso(created)`**
+
+**ALL 22 tools must be updated** from nested format to flat format.
+
+### Key Corrections for Responses API
+
+**CRITICAL:** Responses API has different response structure:
+
+```python
+# WRONG (Chat Completions style):
+if response.choices[0].message.tool_calls:
+    tool_calls = response.choices[0].message.tool_calls
+    final_response = response.choices[0].message.content
+
+# CORRECT (Responses API style):
+for item in response.output or []:
+    if item.type == "tool_call":
+        for tool_call in item.tool_calls:
+            name = tool_call.name  # Direct access
+            args = tool_call.arguments  # JSON string
+            
+# Get text response:
+final_response = response.output_text
+```
+
+**Tool Submission:**
+```python
+# Submit tool outputs
+await client.responses.submit_tool_outputs(
+    response_id=response.id,
+    tool_outputs=[{"tool_call_id": tool_call_id, "output": result_json}]
 )
 
-# Add multiple items at once (up to 20)
-await openai.conversations.items.create(
-    conversation_id=conversation_id,
-    items=[
-        {"type": "message", "role": "user", "content": "Hello"},
-        {"type": "message", "role": "assistant", "content": "Hi!"}
+# Then retrieve final response
+response = await client.responses.retrieve(response_id=response.id)
+```
+
+### 7.1 Tool Format Update Script
+
+**Create:** `update_tool_formats.py`
+```python
+#!/usr/bin/env python3
+import re
+
+def convert_tool_format(old_tool_str):
+    """Convert Assistant API tool format to Responses API format."""
+    # Pattern to match nested function tools
+    pattern = r'\{\s*"type":\s*"function",\s*"function":\s*\{\s*"name":\s*"([^"]+)",\s*"description":\s*"([^"]+)",\s*"parameters":\s*(\{[^}]+\})\s*\}\s*\}'
+    
+    def replace_func(match):
+        name, desc, params = match.groups()
+        return f'{{"type": "function", "name": "{name}", "description": "{desc}", "parameters": {params}}}'
+    
+    return re.sub(pattern, replace_func, old_tool_str, flags=re.DOTALL)
+
+# Usage:
+# Read openai_agent.py, find tools_list, apply conversion
+```
     ]
 )
 
@@ -418,6 +507,81 @@ await openai.conversations.items.delete(
 ```
 
 ### 7. Tool Migration Details
+
+#### Tool Format Changes (CRITICAL)
+
+**Assistant API Format (OLD - nested):**
+```python
+{
+  "type": "function",
+  "function": {
+    "name": "get_weather",
+    "description": "Get the weather for a location",
+    "parameters": {
+      "type": "object",
+      "properties": { "location": { "type": "string" } },
+      "required": ["location"]
+    }
+  }
+}
+```
+
+**Responses API Format (NEW - flat):**
+```python
+{
+  "type": "function",
+  "name": "get_weather",
+  "description": "Get the weather for a location",
+  "parameters": {
+    "type": "object",
+    "properties": { "location": { "type": "string" } },
+    "required": ["location"]
+  }
+}
+```
+
+**Key Change:** Function name, description, and parameters are now **top-level** in the tool object, not nested under a "function" key.
+
+**Built-in Tools (NEW):**
+```python
+[
+  { "type": "code_interpreter", "container": { "type": "auto" } },
+  { "type": "image_generation" },
+  { "type": "web_search_preview", "search_context_size": "medium" },
+  {
+    "type": "mcp",
+    "server_url": "https://example.com/mcp",
+    "server_label": "example",
+    "allowed_tools": ["tool_name"]
+  }
+]
+```
+
+#### Migration Requirements for All 22 Tools
+
+**File:** `app/openai_agent.py`
+**Location:** Lines where tools_list is constructed
+
+**Find and replace pattern:**
+```python
+# OLD FORMAT (remove the "function" wrapper):
+{
+    "type": "function",
+    "function": {
+        "name": "tool_name",
+        "description": "...",
+        "parameters": {...}
+    }
+}
+
+# NEW FORMAT (flatten to top level):
+{
+    "type": "function", 
+    "name": "tool_name",
+    "description": "...",
+    "parameters": {...}
+}
+```
 
 **Current Tools (22 total):**
 - `analyze_payment_proof` - Image/PDF analysis
@@ -593,6 +757,71 @@ items = await openai_client.conversations.messages.list(
 - ✅ Database structure (with minor column addition)
 
 ## Phased Migration Steps
+
+### Phase 0: Project Setup (watibot4)
+
+#### Step 0.1: Copy Project
+```bash
+# Copy entire watibot3 to watibot4
+cp -r /home/robin/watibot3 /home/robin/watibot4
+cd /home/robin/watibot4
+```
+
+#### Step 0.2: Create Virtual Environment
+```bash
+# Create Python virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+#### Step 0.3: Update Port Configuration
+**File:** Configuration file (likely `config.py` or `.env`)
+**Change:** Update port from current to `8006`
+```python
+# Find and update:
+PORT = 8006  # or whatever variable controls the port
+```
+
+#### Step 0.4: Create systemctl Service
+**Create:** `/etc/systemd/system/watibot4.service`
+```ini
+[Unit]
+Description=WatiBot4 - Responses API Migration
+After=network.target
+
+[Service]
+Type=simple
+User=robin
+WorkingDirectory=/home/robin/watibot4
+Environment=PATH=/home/robin/watibot4/venv/bin
+ExecStart=/home/robin/watibot4/venv/bin/python -m app.main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Step 0.5: Enable and Test Service
+```bash
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable service
+sudo systemctl enable watibot4
+
+# Start service
+sudo systemctl start watibot4
+
+# Check status
+sudo systemctl status watibot4
+
+# Test endpoint
+curl http://localhost:8006/health  # or appropriate test endpoint
+```
 
 ### Phase 1: Preparation
 

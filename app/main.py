@@ -10,6 +10,7 @@ from . import thread_store
 from . import message_buffer
 from . import whisper_client
 from . import image_classifier, payment_proof_analyzer as payment_proof_tool
+from . import security
 from app.adapters.channel_detector import detect_channel
 from app.adapters.manychat_fb_adapter import ManyChatFBAdapter
 from app.adapters.manychat_ig_adapter import ManyChatIGAdapter
@@ -20,7 +21,7 @@ import time
 import os
 import tempfile
 import httpx
-from agent_context_injector import process_agent_context_for_user
+# Agent context now handled inline in get_openai_response()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -432,6 +433,10 @@ waid_last_message = {}
 # Thread-safe lock for timer management (prevents race conditions)
 timer_lock = threading.Lock()
 
+# Thread-safe lock for conversation access (prevents OpenAI conversation race conditions)
+conversation_locks = {}
+conversation_lock = threading.Lock()
+
 # ManyChat tracking (separate from WATI)
 mc_timers = {}
 mc_last_message = {}
@@ -443,12 +448,24 @@ def startup_event():
     thread_store.init_db()
     message_buffer.init_message_buffer_db()
 
-def timer_callback(wa_id):
+def timer_callback(wa_id, timer_start_time=None):
     time.sleep(5)  # Add a 5-second delay to mitigate race condition with WATI DB
-    # Wait 60 seconds to gather all messages
-    threading.Event().wait(60)
-    # Gather all messages buffered in the last 60s
-    buffered_messages = message_buffer.get_and_clear_buffered_messages(wa_id, since_seconds=65)
+    # Wait 30 seconds to gather all messages
+    threading.Event().wait(30)
+    
+    # Calculate exact buffer window based on when the timer started
+    if timer_start_time:
+        # Get all messages since the timer started (plus a small safety buffer)
+        time_elapsed = (datetime.utcnow() - timer_start_time).total_seconds()
+        buffer_window = int(time_elapsed) + 5  # Add 5 second safety buffer
+        logger.info(f"[BUFFER] Timer for {wa_id} started at {timer_start_time}, using buffer window of {buffer_window}s")
+    else:
+        # Fallback to old logic
+        buffer_window = 45  # 35 + 10 safety buffer
+        logger.info(f"[BUFFER] No timer start time for {wa_id}, using fallback buffer window of {buffer_window}s")
+    
+    # Gather all messages buffered in the calculated window
+    buffered_messages = message_buffer.get_and_clear_buffered_messages(wa_id, since_seconds=buffer_window)
     if not buffered_messages:
         logger.info(f"[BUFFER] No messages to process for {wa_id}")
         with timer_lock:
@@ -510,54 +527,90 @@ def timer_callback(wa_id):
         thread_info = thread_store.get_thread_id(wa_id)
         thread_id = thread_info['thread_id'] if thread_info else None
 
-        # --- ONE-TIME HISTORY IMPORT --- #
-        if thread_info and not thread_info.get('history_imported'):
-            logger.info(f"[HISTORY_IMPORT] History not imported for {wa_id}. Starting import...")
+        # --- ONE-TIME HISTORY IMPORT (SEQUENTIAL) --- #
+        # DISABLED: History now handled by agent_context_injector.py
+        if False and (not thread_info or not thread_info.get('history_imported')):
+            logger.info(f"[HISTORY_IMPORT] History not imported for {wa_id}. Starting SEQUENTIAL import...")
             
             # Define the go-live date (naive, for direct comparison)
             GO_LIVE_DATE = datetime(2025, 7, 5)
             MESSAGE_LIMIT = 200
 
-            history_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(history_loop)
-            # Fetch all messages before the go-live date
-            all_pre_live_history = history_loop.run_until_complete(
-                get_pre_live_history(wa_id, before_date=GO_LIVE_DATE)
-            )
-            history_loop.close()
+            history_import_success = False
+            try:
+                history_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(history_loop)
+                # Fetch all messages before the go-live date
+                all_pre_live_history = history_loop.run_until_complete(
+                    get_pre_live_history(wa_id, before_date=GO_LIVE_DATE)
+                )
+                history_loop.close()
 
-            if all_pre_live_history:
-                # Take the last 30 messages (the most recent ones)
-                limited_history = all_pre_live_history[-MESSAGE_LIMIT:]
-                logger.info(f"[HISTORY_IMPORT] Found {len(all_pre_live_history)} total pre-live messages. Capping at {len(limited_history)}.")
+                if all_pre_live_history:
+                    # Take the last MESSAGE_LIMIT messages (the most recent ones)
+                    limited_history = all_pre_live_history[-MESSAGE_LIMIT:]
+                    logger.info(f"[HISTORY_IMPORT] Found {len(all_pre_live_history)} total pre-live messages. Capping at {len(limited_history)}.")
 
-                # Format history into a single message
-                formatted_history = f"Este es el historial de conversación más reciente ({len(limited_history)} mensajes antes del 5 de Julio, 2025) para darte contexto:\n\n---"
-                for msg in limited_history:
-                    try:
-                        ts = datetime.fromisoformat(msg.get('created').replace('Z', '+00:00'))
-                        formatted_ts = ts.strftime('%Y-%m-%d %H:%M')
-                        sender = "Usuario" if msg.get('eventType') == 'message' else "Asistente"
-                        text = msg.get('text', '[Mensaje sin texto]')
-                        formatted_history += f"\n[{formatted_ts}] {sender}: {text}"
-                    except Exception as e:
-                        logger.warning(f"[HISTORY_IMPORT] Could not format message: {msg}. Error: {e}")
-                formatted_history += "\n---"
-                
-                # Add the formatted history to the thread
-                if thread_id:
-                    logger.info(f"[HISTORY_IMPORT] Injecting {len(limited_history)} pre-go-live messages into thread {thread_id} for {wa_id}")
-                    injection_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(injection_loop)
-                    success = injection_loop.run_until_complete(openai_agent.add_message_to_thread(thread_id, formatted_history))
-                    injection_loop.close()
-                    if success:
+                    # Format history into a single message
+                    formatted_history = f"Este es el historial de conversación más reciente ({len(limited_history)} mensajes antes del 5 de Julio, 2025) para darte contexto:\n\n---"
+                    for msg in limited_history:
+                        try:
+                            # Fix timestamp format - normalize microseconds to 6 digits
+                            timestamp_str = msg.get('created', '')
+                            if '.' in timestamp_str and not timestamp_str.endswith('Z'):
+                                # Handle microseconds - pad to 6 digits if needed
+                                parts = timestamp_str.split('.')
+                                if len(parts) == 2:
+                                    microseconds = parts[1].ljust(6, '0')[:6]  # Pad or truncate to 6 digits
+                                    timestamp_str = f"{parts[0]}.{microseconds}"
+                            
+                            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            formatted_ts = ts.strftime('%Y-%m-%d %H:%M')
+                            sender = "Usuario" if msg.get('eventType') == 'message' else "Asistente"
+                            text = msg.get('text', '[Mensaje sin texto]')
+                            formatted_history += f"\n[{formatted_ts}] {sender}: {text}"
+                        except Exception as e:
+                            logger.warning(f"[HISTORY_IMPORT] Could not format message: {msg}. Error: {e}")
+                    formatted_history += "\n---"
+                    
+                    # Add the formatted history to the thread - WAIT FOR COMPLETION
+                    if thread_id:
+                        logger.info(f"[HISTORY_IMPORT] Injecting {len(limited_history)} pre-go-live messages into thread {thread_id} for {wa_id}")
+                        injection_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(injection_loop)
+                        success = injection_loop.run_until_complete(openai_agent.add_message_to_thread(thread_id, formatted_history))
+                        injection_loop.close()
+                        if success:
+                            thread_store.set_history_imported(wa_id)
+                            history_import_success = True
+                            logger.info(f"[HISTORY_IMPORT] Successfully imported and marked history for {wa_id}.")
+                        else:
+                            logger.error(f"[HISTORY_IMPORT] Failed to inject history for {wa_id}. Will not proceed with message processing.")
+                            return  # Exit early if history import fails
+                    else:
+                        # No thread_id (new conversation with Responses API) - mark as imported since agent context injection handles history
+                        logger.info(f"[HISTORY_IMPORT] No thread_id for {wa_id} (Responses API mode). Marking history as imported - agent context injection will handle context.")
                         thread_store.set_history_imported(wa_id)
-                        logger.info(f"[HISTORY_IMPORT] Successfully imported and marked history for {wa_id}.")
-            else:
-                logger.info(f"[HISTORY_IMPORT] No pre-live messages found for {wa_id}. Marking as imported.")
-                thread_store.set_history_imported(wa_id)
-        # --- END OF HISTORY IMPORT --- #
+                        history_import_success = True
+                else:
+                    logger.info(f"[HISTORY_IMPORT] No pre-live messages found for {wa_id}. Marking as imported.")
+                    thread_store.set_history_imported(wa_id)
+                    history_import_success = True
+                    
+            except Exception as e:
+                logger.error(f"[HISTORY_IMPORT] Unexpected error during history import for {wa_id}: {e}")
+                return  # Exit early if history import fails completely
+            
+            if not history_import_success:
+                logger.error(f"[HISTORY_IMPORT] History import failed for {wa_id}. Aborting message processing to avoid race condition.")
+                return
+                
+            logger.info(f"[HISTORY_IMPORT] History import completed successfully for {wa_id}. Now running agent context injection...")
+            
+            logger.info(f"[HISTORY_IMPORT] All context preparation completed for {wa_id}. Proceeding with message processing.")
+        else:
+            logger.info(f"[AGENT_CONTEXT] History already imported for {wa_id}. Agent context will be handled inline.")
+        # --- END OF SEQUENTIAL HISTORY IMPORT --- #
 
         # Implement exponential backoff retry logic with 15-minute timeout and escalation
         start_time = time.time()
@@ -655,7 +708,7 @@ def timer_callback(wa_id):
         waid_timers.pop(wa_id, None)
 
 
-def manychat_timer_callback(conversation_id: str, channel: str, user_id: str):
+def manychat_timer_callback(conversation_id: str, channel: str, user_id: str, timer_start_time=None):
     """Aggregates buffered ManyChat messages and sends AI response via appropriate adapter.
 
     conversation_id is formatted as "{channel}:{user_id}" to avoid collisions with WATI keys.
@@ -663,7 +716,16 @@ def manychat_timer_callback(conversation_id: str, channel: str, user_id: str):
     # Wait 60 seconds to gather messages similar to WATI behavior
     threading.Event().wait(60)
 
-    buffered_messages = message_buffer.get_and_clear_buffered_messages(conversation_id, since_seconds=65)
+    # Calculate buffer window similar to WATI logic
+    if timer_start_time:
+        time_elapsed = (datetime.utcnow() - timer_start_time).total_seconds()
+        buffer_window = int(time_elapsed) + 5  # Add 5 second safety buffer
+        logging.info(f"[MC_BUFFER] Timer for {conversation_id} started at {timer_start_time}, using buffer window of {buffer_window}s")
+    else:
+        buffer_window = 75  # Fallback
+        logging.info(f"[MC_BUFFER] No timer start time for {conversation_id}, using fallback buffer window of {buffer_window}s")
+
+    buffered_messages = message_buffer.get_and_clear_buffered_messages(conversation_id, since_seconds=buffer_window)
     if not buffered_messages:
         logging.info(f"[MC_BUFFER] No messages to process for {conversation_id}")
         with mc_timer_lock:
@@ -773,8 +835,9 @@ def root():
 
 @app.post("/manychat/webhook")
 async def manychat_webhook(request: Request):
-    """Unified ManyChat webhook handler for Facebook and Instagram.
+    """Unified ManyChat webhook handler for Facebook and Instagram with passkey authentication.
 
+    - Validates passkey authentication first
     - Detects channel via `detect_channel`.
     - Parses payload via channel-specific adapter into UnifiedMessage.
     - Buffers messages by conversation_id and triggers timer processing.
@@ -792,6 +855,9 @@ async def manychat_webhook(request: Request):
         except Exception:
             logger.error(f"[MC] Could not parse request body: {body!r}")
             return {"status": "error", "detail": "Could not parse body as JSON or form data"}
+
+    # SECURITY: Validate passkey authentication - will trigger fail2ban on failure
+    security.validate_webhook_auth(request, data)
 
     # Detect the channel
     try:
@@ -818,13 +884,15 @@ async def manychat_webhook(request: Request):
     message_buffer.buffer_message(conversation_id, msg_type, content)
 
     # Start a timer for this conversation if not running
+    now = datetime.utcnow()
     with mc_timer_lock:
         if conversation_id not in mc_timers:
-            t = threading.Thread(target=manychat_timer_callback, args=(conversation_id, unified_msg.channel, unified_msg.user_id))
+            timer_start_time = now
+            t = threading.Thread(target=manychat_timer_callback, args=(conversation_id, unified_msg.channel, unified_msg.user_id, timer_start_time))
             t.daemon = True
             mc_timers[conversation_id] = t
             t.start()
-            logger.info(f"[MC_TIMER] Started timer for {conversation_id}")
+            logger.info(f"[MC_TIMER] Started timer for {conversation_id} at {timer_start_time}")
         else:
             logger.info(f"[MC_TIMER] Timer already running for {conversation_id}, message buffered")
 
@@ -832,6 +900,12 @@ async def manychat_webhook(request: Request):
 
 @app.post("/webhook")
 async def wati_webhook(request: Request):
+    """WATI webhook handler with passkey authentication for watibot4.
+    
+    - Validates passkey authentication first  
+    - Processes WATI WhatsApp messages
+    - Buffers messages and triggers AI processing
+    """
     # Clean up old threads before processing
     # thread_store.delete_old_threads()  # Commented out to preserve conversation history indefinitely
     body = await request.body()
@@ -848,6 +922,8 @@ async def wati_webhook(request: Request):
             if not phone_number:
                 phone_number = "test"
             message = "hola"
+            # Create minimal data structure for authentication check
+            data = {"waId": phone_number, "text": message}
             logger.info(f"[DEBUG] Using phone_number='{phone_number}' for null payload")
         else:
             try:
@@ -865,44 +941,39 @@ async def wati_webhook(request: Request):
                 logger.error("Could not parse body as JSON or form data")
                 return {"status": "error", "detail": "Could not parse body as JSON or form data"}
 
-            phone_number = data.get("waId") or data.get("phone")
-            message = data.get("text") or data.get("message") or data.get("userMessage")
-            reply_context_id = data.get("replyContextId")  # Extract reply context ID
-            logger.info(f"PARSED DATA: {data}")  # Enhanced logging for payload structure
-            logger.info(f"[DEBUG] Parsed waId: {phone_number}, message: {message}, replyContextId: {reply_context_id}")
+        # SECURITY: Validate passkey authentication - will trigger fail2ban on failure
+        security.validate_webhook_auth(request, data)
 
-            if not phone_number:
-                logger.error("Missing phone number in payload")
-                return {"status": "error", "detail": "Missing phone number in payload"}
-            if not message:
-                logger.error("Missing message in payload")
-                return {"status": "error", "detail": "Missing message in payload"}
+        phone_number = data.get("waId") or data.get("phone")
+        message = data.get("text") or data.get("message") or data.get("userMessage")
+        reply_context_id = data.get("replyContextId")  # Extract reply context ID
+        logger.info(f"PARSED DATA: {data}")  # Enhanced logging for payload structure
+        logger.info(f"[DEBUG] Parsed waId: {phone_number}, message: {message}, replyContextId: {reply_context_id}")
 
-            # --- Agent Context Injection ---
-            # Run in a background thread to avoid blocking the webhook response
+        if not phone_number:
+            logger.error("Missing phone number in payload")
+            return {"status": "error", "detail": "Missing phone number in payload"}
+        if not message:
+            logger.error("Missing message in payload")
+            return {"status": "error", "detail": "Missing message in payload"}
+
+        # NOTE: Agent context now handled inline in get_openai_response() via enhanced developer input
+
+        # --- Reply Context Enhancement ---
+        # If this is a reply to a previous message, get the original message context
+        if reply_context_id:
             try:
-                context_thread = threading.Thread(target=process_agent_context_for_user, args=(phone_number,))
-                context_thread.daemon = True
-                context_thread.start()
-                logger.info(f"[AGENT_CONTEXT] Dispatched context check for {phone_number}")
+                original_context = await get_original_message_context(phone_number, reply_context_id)
+                if original_context:
+                    # Enhance the message with reply context
+                    enhanced_message = f"(Customer is replying to: \"{original_context}\") {message}"
+                    logger.info(f"[REPLY_CONTEXT] Enhanced message with context: {enhanced_message[:200]}...")
+                    message = enhanced_message
+                else:
+                    logger.info(f"[REPLY_CONTEXT] No context found or retrieved for replyContextId: {reply_context_id}")
             except Exception as e:
-                logger.error(f"[AGENT_CONTEXT] Failed to dispatch context check for {phone_number}: {e}")
-
-            # --- Reply Context Enhancement ---
-            # If this is a reply to a previous message, get the original message context
-            if reply_context_id:
-                try:
-                    original_context = await get_original_message_context(phone_number, reply_context_id)
-                    if original_context:
-                        # Enhance the message with reply context
-                        enhanced_message = f"(Customer is replying to: \"{original_context}\") {message}"
-                        logger.info(f"[REPLY_CONTEXT] Enhanced message with context: {enhanced_message[:200]}...")
-                        message = enhanced_message
-                    else:
-                        logger.info(f"[REPLY_CONTEXT] No context found or retrieved for replyContextId: {reply_context_id}")
-                except Exception as e:
-                    logger.warning(f"[REPLY_CONTEXT] Failed to retrieve reply context: {e}")
-                    # Continue with original message - no breaking changes
+                logger.warning(f"[REPLY_CONTEXT] Failed to retrieve reply context: {e}")
+                # Continue with original message - no breaking changes
 
         # --- Message Buffering Logic ---
         # --- Message Buffering Logic (Resilient Version) ---
@@ -952,11 +1023,13 @@ async def wati_webhook(request: Request):
         with timer_lock:
             # If no timer is running for this waId, start one
             if phone_number not in waid_timers:
-                t = threading.Thread(target=timer_callback, args=(phone_number,))
+                # Store the exact start time for this timer
+                timer_start_time = now
+                t = threading.Thread(target=timer_callback, args=(phone_number, timer_start_time))
                 t.daemon = True
                 waid_timers[phone_number] = t
                 t.start()
-                logger.info(f"[TIMER_THREAD] Started new timer thread for {phone_number}")
+                logger.info(f"[TIMER_THREAD] Started new timer thread for {phone_number} at {timer_start_time}")
             else:
                 logger.info(f"[TIMER_THREAD] Timer already running for {phone_number}, message buffered")
         # Immediately return a batching notice to WATI

@@ -111,23 +111,25 @@ def get_openai_thread_messages(thread_id):
         import openai
         openai.api_key = config.OPENAI_API_KEY
         
-        # Get all messages from the thread
-        response = openai.beta.threads.messages.list(thread_id=thread_id, limit=100)
-        messages = response.data
+        # With Responses API, conversation history is handled automatically
+        print("[WEBHOOK_COMPARATOR] Note: Conversation items not available with Responses API")
+        items = []
         
         # Extract user messages (those sent via webhook)
         user_messages = []
-        for msg in messages:
-            if msg.role == 'user':
+        for item in items:
+            if item.type == 'message' and item.role == 'user':
                 # Extract text content
                 content = ""
-                for content_block in msg.content:
-                    if content_block.type == 'text':
-                        content += content_block.text.value
+                for content_block in item.content:
+                    if content_block.type == 'input_text':
+                        content += content_block.text
+                    elif content_block.type == 'text':
+                        content += content_block.text
                 
                 user_messages.append({
                     'content': content,
-                    'created_at': msg.created_at
+                    'created_at': item.created_at
                 })
         
         print("[OPENAI] Found " + str(len(user_messages)) + " user messages in thread")
@@ -158,22 +160,24 @@ def get_assistant_responses_from_thread(wa_id):
                 import openai
                 openai.api_key = config.OPENAI_API_KEY
                 
-                # Get all messages from the thread
-                response = openai.beta.threads.messages.list(thread_id=thread_id, limit=100)
-                messages = response.data
+                # With Responses API, conversation history is handled automatically
+                print("[WEBHOOK_COMPARATOR] Note: Conversation items not available with Responses API")
+                items = []
                 
                 # Extract assistant messages
-                for msg in messages:
-                    if msg.role == 'assistant':
+                for item in items:
+                    if item.type == 'message' and item.role == 'assistant':
                         # Extract text content
                         content = ""
-                        for content_block in msg.content:
-                            if content_block.type == 'text':
-                                content += content_block.text.value
+                        for content_block in item.content:
+                            if content_block.type == 'output_text':
+                                content += content_block.text
+                            elif content_block.type == 'text':
+                                content += content_block.text
                         
                         assistant_messages.append({
                             'content': content,
-                            'created_at': msg.created_at
+                            'created_at': item.created_at
                         })
                 
                 print("[ASSISTANT] Found " + str(len(assistant_messages)) + " assistant messages")

@@ -789,7 +789,7 @@ async def _check_room_availability(check_in_date: str, check_out_date: str) -> d
         }
         
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=30.0)
+            response = await client.get(url, params=params, timeout=300.0)
             response.raise_for_status()
             
             data = response.json()
@@ -1249,7 +1249,7 @@ async def _make_booking_api_call(
                 "https://booking.lashojasresort.club/api/addBookingUserRest",
                 data=payload,
                 headers={"content-type": "application/x-www-form-urlencoded"},
-                timeout=30
+                timeout=300
             )
             
             logger.info(f"[BOOKING_API] Response status: {response.status_code}")

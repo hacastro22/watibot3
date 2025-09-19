@@ -73,10 +73,7 @@ async def classify_image_with_context(
 
         CLASSIFICATION CATEGORIES:
         1. "payment_proof" - Images that are clearly payment receipts, bank transfers, or CompraClick confirmations
-        2. "general_inquiry" - Images related to questions about facilities, rooms, menus, policies, etc.
-        3. "document" - Screenshots, PDFs, or other informational documents
-        4. "personal_photo" - Personal photos, vacation pictures, selfies, etc.
-        5. "unknown" - Unclear or unrecognizable images
+        2. "general_inquiry" - Any other image that the customer is sharing (facilities, rooms, menus, documents, personal photos, etc.)
 
         IMPORTANT CONTEXT CLUES:
         - Look for payment-related keywords in conversation: "pago", "transferencia", "compraclick", "deposito", "reserva"
@@ -86,16 +83,16 @@ async def classify_image_with_context(
 
         Analyze the image and conversation context, then respond with a JSON object:
         {{
-            "classification": "payment_proof|general_inquiry|document|personal_photo|unknown",
+            "classification": "payment_proof|general_inquiry",
             "confidence": 0.0-1.0,
             "reasoning": "Detailed explanation of why this classification was chosen, considering both image content and conversation context",
             "visual_indicators": ["List of visual elements that support this classification"],
             "context_indicators": ["List of conversation elements that support this classification"],
-            "should_analyze_as_payment": true/false,
-            "suggested_response": "Brief suggestion on how the system should handle this image type"
+            "should_analyze_as_payment": true/false
         }}
 
         Be conservative with payment_proof classification - only classify as payment proof if you're highly confident (>0.8) based on both visual and contextual evidence.
+        If not a payment proof, classify as general_inquiry - the system will handle the image in conversation context.
         """
 
         # Step 3: Create the OpenAI API call
@@ -121,7 +118,7 @@ async def classify_image_with_context(
             }
         ]
 
-        # Step 4: Call OpenAI API
+        # Step 4: Call OpenAI API using Chat Completions API (like watibot3)
         logger.info(f"[IMAGE_CLASSIFIER] Calling OpenAI API for classification")
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
@@ -132,6 +129,7 @@ async def classify_image_with_context(
 
         # Step 5: Parse and validate response
         try:
+            # Extract text from Chat Completions API format (like watibot3)
             result_text = response.choices[0].message.content
             parsed_result = json.loads(result_text)
             
@@ -148,11 +146,28 @@ async def classify_image_with_context(
             # Conservative payment proof detection - require high confidence
             if classification == "payment_proof" and confidence < 0.8:
                 logger.info(f"[IMAGE_CLASSIFIER] Downgrading payment_proof classification due to low confidence: {confidence}")
-                classification = "document"
+                classification = "general_inquiry"
                 should_analyze_as_payment = False
                 reasoning += " (Downgraded due to insufficient confidence for payment proof)"
             
             logger.info(f"[IMAGE_CLASSIFIER] Classification result: {classification} (confidence: {confidence:.2f})")
+            
+            # If it's a general inquiry, handle it directly with Responses API
+            if classification == "general_inquiry":
+                direct_response = await handle_general_inquiry_image(
+                    image_path, wa_id, reasoning, parsed_result.get("visual_indicators", [])
+                )
+                return {
+                    "success": True,
+                    "classification": classification,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "should_analyze_as_payment": False,
+                    "direct_response": direct_response,
+                    "visual_indicators": parsed_result.get("visual_indicators", []),
+                    "context_indicators": parsed_result.get("context_indicators", []),
+                    "error": ""
+                }
             
             return {
                 "success": True,
@@ -160,7 +175,6 @@ async def classify_image_with_context(
                 "confidence": confidence,
                 "reasoning": reasoning,
                 "should_analyze_as_payment": should_analyze_as_payment,
-                "suggested_response": suggested_response,
                 "visual_indicators": parsed_result.get("visual_indicators", []),
                 "context_indicators": parsed_result.get("context_indicators", []),
                 "error": ""
@@ -190,6 +204,119 @@ async def classify_image_with_context(
             "error": f"Classification error: {str(e)}"
         }
 
+async def handle_general_inquiry_image(image_path: str, wa_id: str, classification_reasoning: str, visual_indicators: List[str]) -> Dict[str, Any]:
+    """
+    Handles general inquiry images by sending them directly to GPT-5 via Responses API
+    with full conversation context and system instructions.
+    
+    Args:
+        image_path: Path to the image file
+        wa_id: WhatsApp ID for the user
+        classification_reasoning: Why this was classified as general inquiry
+        visual_indicators: Visual elements detected in the image
+    
+    Returns:
+        dict: Response from the AI system or error information
+    """
+    try:
+        from . import thread_store
+        
+        # Get conversation context
+        conversation_id = thread_store.get_conversation_id(wa_id)
+        previous_response_id = thread_store.get_last_response_id(wa_id)
+        
+        if not conversation_id:
+            logger.error(f"[IMAGE_CLASSIFIER] No conversation ID found for wa_id: {wa_id}")
+            return {
+                "success": False,
+                "response_text": "Error: No conversation context available",
+                "error": "No conversation ID found"
+            }
+        
+        # Load and encode the image
+        try:
+            with open(image_path, 'rb') as img_file:
+                img_content = img_file.read()
+            img_base64 = base64.b64encode(img_content).decode('utf-8')
+        except Exception as e:
+            logger.exception(f"[IMAGE_CLASSIFIER] Error loading image for general inquiry: {str(e)}")
+            return {
+                "success": False,
+                "response_text": "Error processing image",
+                "error": f"Image loading error: {str(e)}"
+            }
+        
+        # Create the input for Responses API
+        image_input = {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "[Usuario envió una imagen]"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_base64}"
+                    }
+                }
+            ]
+        }
+        
+        # Call Responses API using the same pattern as openai_agent.py
+        logger.info(f"[IMAGE_CLASSIFIER] Sending general inquiry image to Responses API for wa_id: {wa_id}")
+        
+        if previous_response_id:
+            # Continue existing conversation
+            response = await client.responses.create(
+                model="gpt-5",
+                previous_response_id=previous_response_id,
+                input=[image_input]
+            )
+        else:
+            # New conversation
+            response = await client.responses.create(
+                model="gpt-5",
+                conversation=conversation_id,
+                input=[image_input]
+            )
+        
+        # Save the response ID for future continuation
+        thread_store.save_response_id(wa_id, response.id)
+        
+        # Extract response text
+        response_text = ""
+        if hasattr(response, 'output') and response.output:
+            for item in response.output:
+                if hasattr(item, 'content') and item.content:
+                    if isinstance(item.content, str):
+                        response_text += item.content
+                    elif isinstance(item.content, list):
+                        for content_block in item.content:
+                            if hasattr(content_block, 'text'):
+                                response_text += content_block.text
+        
+        if not response_text.strip():
+            response_text = "He recibido tu imagen. ¿Podrías darme más detalles sobre lo que necesitas?"
+        
+        logger.info(f"[IMAGE_CLASSIFIER] Generated response for general inquiry: {len(response_text)} chars")
+        
+        return {
+            "success": True,
+            "response_text": response_text.strip(),
+            "response_id": response.id,
+            "error": ""
+        }
+        
+    except Exception as e:
+        logger.exception(f"[IMAGE_CLASSIFIER] Error handling general inquiry image: {str(e)}")
+        return {
+            "success": False,
+            "response_text": "Disculpa, hubo un error procesando tu imagen. ¿Podrías intentar nuevamente?",
+            "error": f"General inquiry handling error: {str(e)}"
+        }
+
 async def get_conversation_context(wa_id: str, max_messages: int = 5) -> str:
     """
     Extracts recent conversation context for the given WhatsApp ID.
@@ -203,55 +330,18 @@ async def get_conversation_context(wa_id: str, max_messages: int = 5) -> str:
     """
     try:
         from . import thread_store
-        from openai import AsyncOpenAI
         
-        # Get the thread data for this customer
-        thread_data = thread_store.get_thread_id(wa_id)
-        if not thread_data or 'thread_id' not in thread_data:
-            logger.info(f"[IMAGE_CLASSIFIER] No thread found for waId: {wa_id}")
+        # Check if we have a conversation for this user
+        conversation_id = thread_store.get_conversation_id(wa_id)
+        if not conversation_id:
+            logger.info(f"[IMAGE_CLASSIFIER] No conversation found for waId: {wa_id}")
             return "No conversation history available."
         
-        thread_id = thread_data['thread_id']
-
-        # Get recent messages from the OpenAI thread
-        openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        try:
-            messages = await openai_client.beta.threads.messages.list(
-                thread_id=thread_id,
-                limit=max_messages,
-                order="desc"
-            )
-            
-            # Format the messages for context
-            context_parts = []
-            for message in reversed(messages.data):  # Reverse to get chronological order
-                role = message.role
-                content = ""
-                
-                # Extract content from message
-                if hasattr(message, 'content') and message.content:
-                    for content_block in message.content:
-                        if hasattr(content_block, 'text') and content_block.text:
-                            content += content_block.text.value
-                        elif hasattr(content_block, 'value'):
-                            content += str(content_block.value)
-                
-                if content.strip():
-                    context_parts.append(f"{role.upper()}: {content.strip()}")
-            
-            context = "\n".join(context_parts[-max_messages:])  # Keep only last N messages
-            
-            if not context.strip():
-                context = "No recent conversation content available."
-            
-            logger.info(f"[IMAGE_CLASSIFIER] Retrieved {len(context_parts)} messages for context")
-            return context
-            
-        except Exception as e:
-            logger.exception(f"[IMAGE_CLASSIFIER] Error retrieving messages from OpenAI thread: {str(e)}")
-            return f"Error retrieving conversation history: {str(e)}"
+        # With Responses API, conversation context is handled automatically by OpenAI
+        # We don't need to manually retrieve or pass conversation history
+        logger.info(f"[IMAGE_CLASSIFIER] Conversation context handled automatically by Responses API for waId: {wa_id}")
+        return "Conversation context is maintained automatically by the AI system. Consider the ongoing conversation when classifying this image."
             
     except Exception as e:
-        logger.exception(f"[IMAGE_CLASSIFIER] Error getting conversation context: {str(e)}")
-        return f"Error accessing conversation context: {str(e)}"
+        logger.exception(f"[IMAGE_CLASSIFIER] Error accessing conversation context: {str(e)}")
+        return "Conversation context handled automatically by AI system."

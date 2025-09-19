@@ -12,6 +12,10 @@ from urllib.parse import urlparse
 from app.adapters.base_channel_adapter import ChannelAdapter
 from app.models.unified_message import MessageType, UnifiedMessage
 from app.clients import manychat_client
+from app.message_humanizer import humanize_response
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ManyChatFBAdapter(ChannelAdapter):
@@ -111,6 +115,16 @@ class ManyChatFBAdapter(ChannelAdapter):
                 media_type = str(media.get("type")).lower()
                 file_path = str(media.get("file_path"))
                 caption = str(media.get("caption")) if media.get("caption") else ""
+                
+                # Humanize caption if present
+                if caption:
+                    try:
+                        humanized_caption = await humanize_response(caption)
+                        logger.info(f"[FB] Caption humanized: {caption[:50]}... -> {humanized_caption[:50]}...")
+                        caption = humanized_caption
+                    except Exception as e:
+                        logger.error(f"[FB] Caption humanization failed, using original: {e}")
+                
                 resp = await manychat_client.send_media_message(
                     subscriber_id=user_id,
                     file_path=file_path,
@@ -123,7 +137,16 @@ class ManyChatFBAdapter(ChannelAdapter):
             # Default to text
             if not message:
                 return False
-            resp = await manychat_client.send_text_message(user_id, message)
+            
+            # Humanize the message before sending
+            try:
+                humanized_message = await humanize_response(message)
+                logger.info(f"[FB] Message humanized: {message[:50]}... -> {humanized_message[:50]}...")
+            except Exception as e:
+                logger.error(f"[FB] Humanization failed, using original message: {e}")
+                humanized_message = message
+            
+            resp = await manychat_client.send_text_message(user_id, humanized_message)
             return resp is not None
         except Exception:
             # Let caller decide on retries

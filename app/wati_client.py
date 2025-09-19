@@ -5,6 +5,7 @@ import holidays
 import os
 import logging
 import mimetypes
+from .message_humanizer import humanize_response
 
 def is_within_business_hours():
     # El Salvador timezone
@@ -230,9 +231,16 @@ async def send_wati_message(phone_number: str, message: str) -> dict:
         return response.json()
 
     else:
-        # Normal message handling
+        # Normal message handling - humanize the message before sending
+        try:
+            humanized_message = await humanize_response(message)
+            logging.info(f"[WATI] Message humanized: {message[:50]}... -> {humanized_message[:50]}...")
+        except Exception as e:
+            logging.error(f"[WATI] Humanization failed, using original message: {e}")
+            humanized_message = message
+        
         url = f"{config.WATI_API_URL}/api/v1/sendSessionMessage/{phone_number}"
-        payload = {"messageText": message}
+        payload = {"messageText": humanized_message}
         async with httpx.AsyncClient() as client:
             response = await client.post(url, data=payload, headers=headers)
             logging.info(f"[DEBUG] WATI API response: {response.status_code} {response.text}")

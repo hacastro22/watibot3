@@ -299,6 +299,7 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                 3. Transaction date (CRITICAL - required for validation, format as MM/DD/YYYY if possible)
                 4. Reference number (if available)
                 5. Confirmation that transfer was to account 200252070
+                6. Recipient account type (CRITICAL - look for "cuenta corriente", "cuenta de ahorro", "corriente", or "ahorro" to determine if transfer was sent to correct account type)
                 
                 Return only a JSON response with the following structure. The 'chain_of_thought' is for internal analysis; DO NOT expose it to the end user:
                 {
@@ -310,7 +311,8 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                             {"step": 2, "action": "Detect payment type", "reasoning": "Look for CompraClick or bank indicators", "result": "Found: [indicators]"},
                             {"step": 3, "action": "Extract key information", "reasoning": "Identify required fields for validation", "result": "Extracted: [fields]"},
                             {"step": 4, "action": "Authorization field validation", "reasoning": "For CompraClick: verify 'Autorización' field exists (not RECIBO)", "result": "Authorization field: Found/Missing"},
-                            {"step": 5, "action": "Validate completeness", "reasoning": "Check if all critical info is present", "result": "Complete/Missing: [details]"}
+                            {"step": 5, "action": "Account type validation", "reasoning": "For bank transfer: verify if recipient account type is cuenta corriente (correct) or cuenta de ahorro (incorrect)", "result": "Account type: [detected_type] - Correct/Incorrect"},
+                            {"step": 6, "action": "Validate completeness", "reasoning": "Check if all critical info is present", "result": "Complete/Missing: [details]"}
                         ],
                         "conclusion": "Receipt type identified with X% confidence"
                     },
@@ -321,11 +323,16 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                         "timestamp": string (date/time of transaction),
                         "additional_info": {
                             "card_last_four": string (for CompraClick only),
-                            "target_account": string (for bank transfer only, should be "200252070")
+                            "target_account": string (for bank transfer only, should be "200252070"),
+                            "recipient_account_type": string (for bank transfer only: "cuenta_corriente", "cuenta_de_ahorro", or "unknown")
                         }
                     },
                     "detection_confidence": float (0.0 to 1.0),
                     "detected_indicators": [list of indicators found that led to the classification],
+                    "account_type_validation": {
+                        "is_correct_account_type": boolean (true if cuenta corriente, false if cuenta de ahorro),
+                        "detected_account_type": string (the account type found in the receipt)
+                    },
                     "comments": string (any additional observations or potential issues)
                 }
                 
@@ -351,7 +358,8 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                 "image_url": img["image_url"]
             })
 
-        # Call OpenAI API
+        # Call OpenAI API using Responses API
+        # Use Chat Completions API (supports images properly)
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -361,6 +369,7 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
 
         # Parse response
         try:
+            # Extract text from Chat Completions API format
             result = response.choices[0].message.content
             parsed_result = json.loads(result)
 
@@ -371,6 +380,25 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
             parsed_result.setdefault("chain_of_thought", {})
             parsed_result.setdefault("extracted_info", {})
             parsed_result.setdefault("error", "")
+
+            # Validate account type for bank transfers
+            if parsed_result.get("receipt_type") == "bank_transfer":
+                account_type_validation = parsed_result.get("account_type_validation", {})
+                detected_account_type = account_type_validation.get("detected_account_type", "").lower()
+                
+                # Check if account type indicates wrong account type
+                if "ahorro" in detected_account_type or "cuenta_de_ahorro" in detected_account_type:
+                    account_type_validation["is_correct_account_type"] = False
+                    # Add warning to comments
+                    current_comments = parsed_result.get("comments", "")
+                    error_msg = "ACCOUNT TYPE ERROR: Transfer was sent to 'cuenta de ahorro' but should be sent to 'cuenta corriente'."
+                    parsed_result["comments"] = f"{current_comments} {error_msg}".strip()
+                elif "corriente" in detected_account_type or "cuenta_corriente" in detected_account_type:
+                    account_type_validation["is_correct_account_type"] = True
+                else:
+                    account_type_validation["is_correct_account_type"] = None  # Unknown account type
+                
+                parsed_result["account_type_validation"] = account_type_validation
 
             return parsed_result
 

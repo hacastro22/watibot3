@@ -36,13 +36,14 @@ def inspect_thread(thread_id):
         print("Thread ID: {}".format(thread_id))
         print("")
         
-        # Get all messages from the thread
-        messages = client.beta.threads.messages.list(
-            thread_id=thread_id,
-            order="asc"  # Oldest first
-        )
+        # With Responses API, conversation items are not directly accessible
+        print(f"Note: Conversation inspection simplified with Responses API")
+        print(f"Conversation ID: {thread_id}")
+        return
+        # Filter only message items
+        messages = [item for item in items_response.data if item.type == "message"]
         
-        print("Total messages in thread: {}".format(len(messages.data)))
+        print("Total messages in conversation: {}".format(len(messages)))
         print("")
         
         # Focus on July 31st context injection to see what was actually injected
@@ -57,7 +58,7 @@ def inspect_thread(thread_id):
         print("\nALL MESSAGE TIMESTAMPS IN THREAD:")
         print("-" * 40)
         
-        for i, message in enumerate(messages.data):
+        for i, message in enumerate(messages):
             # Convert timestamp to readable format
             timestamp = datetime.fromtimestamp(message.created_at)
             timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
@@ -75,8 +76,12 @@ def inspect_thread(thread_id):
             content = ""
             if hasattr(message, 'content') and message.content:
                 for content_item in message.content:
-                    if hasattr(content_item, 'text') and hasattr(content_item.text, 'value'):
-                        content += content_item.text.value
+                    if content_item.type == "input_text":
+                        content += content_item.text
+                    elif content_item.type == "output_text":
+                        content += content_item.text
+                    elif hasattr(content_item, 'text'):
+                        content += str(content_item.text)
             
             if "2025-07-25" in content or "July 25" in content:
                 july_25_mentions.append((i, message, timestamp_str))

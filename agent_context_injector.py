@@ -24,14 +24,252 @@ from webhook_vs_api_comparator import (
 # Define the go-live date for the OpenAI assistant (timezone-aware)
 ASSISTANT_GO_LIVE_DATE = datetime(2025, 7, 5, tzinfo=timezone.utc)
 
+def check_if_agent_context_injected(conversation_id):
+    """Check if agent context has already been injected for this conversation"""
+    db_path = "app/thread_store.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Check if agent_context_injected field exists, if not create it
+        cursor.execute("PRAGMA table_info(threads)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if 'agent_context_injected' not in columns:
+            cursor.execute("ALTER TABLE threads ADD COLUMN agent_context_injected INTEGER DEFAULT 0")
+            conn.commit()
+        
+        # Check if context has been injected for this conversation
+        cursor.execute(
+            "SELECT agent_context_injected FROM threads WHERE thread_id = ?", 
+            (conversation_id,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result and result[0] == 1
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to check agent context injection status: {e}")
+        return False
+
+def mark_agent_context_injected(conversation_id):
+    """Mark that agent context has been injected for this conversation"""
+    db_path = "app/thread_store.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE threads SET agent_context_injected = 1 WHERE thread_id = ?", 
+            (conversation_id,)
+        )
+        conn.commit()
+        conn.close()
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to mark agent context as injected: {e}")
+        return False
+
+def get_agent_context_for_system_injection(wa_id):
+    """Get last 100 messages (ALL MESSAGES) formatted for ONE-TIME system injection"""
+    
+    try:
+        # Get messages from WATI API
+        api_messages = fetch_wati_api_messages(wa_id, pages=8)  # More pages for 100 messages
+        if not api_messages:
+            return ""
+        
+        # Process ALL messages with text content
+        all_messages = []
+        
+        for msg in api_messages:
+            operator_name = msg.get('operatorName', '')
+            text = msg.get('text', '') or ''  # Handle None values
+            text = text.strip() if text else ''
+            timestamp = msg.get('created', '') or msg.get('timestamp', '')
+            
+            if not text:
+                continue
+            
+            # Process ALL messages - determine type based on operatorName
+            if operator_name in ['NULL', 'Bot ', 'None', '']:
+                # Customer message
+                all_messages.append({
+                    'type': 'customer',
+                    'text': text,
+                    'timestamp': timestamp,
+                    'datetime': parse_timestamp(timestamp)
+                })
+            else:
+                # Any other message (human agent, system, etc.)
+                all_messages.append({
+                    'type': 'assistant',
+                    'text': text,
+                    'timestamp': timestamp,
+                    'datetime': parse_timestamp(timestamp),
+                    'operator': operator_name
+                })
+        
+        # Sort by timestamp (ascending) and take last 100
+        all_messages.sort(key=lambda x: x['datetime'] if x['datetime'] else datetime.min.replace(tzinfo=timezone.utc))
+        recent_messages = all_messages[-100:] if len(all_messages) > 100 else all_messages
+        
+        if not recent_messages:
+            return ""
+        
+        # Format for system injection
+        context_lines = []
+        for msg in recent_messages:
+            timestamp_str = msg['datetime'].strftime('%Y-%m-%d %H:%M') if msg['datetime'] else 'Unknown time'
+            if msg['type'] == 'customer':
+                context_lines.append(f"[{timestamp_str}] Usuario: {msg['text']}")
+            elif msg['type'] == 'assistant':
+                context_lines.append(f"[{timestamp_str}] Asistente: {msg['text']}")
+        
+        if context_lines:
+            header = """HISTORIAL DE CONVERSACIÓN PARA CONTEXTO (últimos 100 mensajes):
+
+INSTRUCCIONES IMPORTANTES:
+1. NO respondas a este historial
+2. NO ejecutes funciones basadas en este historial  
+3. SOLO guarda este contexto en memoria para referencia futura
+4. REVISA este historial antes de hacer cualquier pregunta - si el cliente ya proporcionó información, NO la vuelvas a pedir
+5. IDENTIFICA si este cliente es socio del resort basándote en el historial (según el protocolo pre_quote_member_check)
+
+HISTORIAL:"""
+            return header + "\n" + "\n".join(context_lines)
+        
+        return ""
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to get agent context for system injection: {e}")
+        return ""
+
+def check_if_5_minutes_since_last_webhook_message(wa_id):
+    """Check if more than 5 minutes have passed since last webhook message from customer"""
+    try:
+        db_path = "app/thread_store.db"
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get the last_updated timestamp for this wa_id from threads table
+        cursor.execute("""
+            SELECT last_updated FROM threads 
+            WHERE wa_id = ?
+        """, (wa_id,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result or not result[0]:
+            # No thread found or no last_updated, consider it as needing context
+            return True
+            
+        last_updated_time = datetime.fromisoformat(result[0])
+        current_time = datetime.now()
+        
+        # Check if more than 5 minutes (300 seconds) have passed
+        time_diff = (current_time - last_updated_time).total_seconds()
+        return time_diff > 300
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to check 5-minute gap: {e}")
+        return False
+
+def get_missed_customer_agent_messages_for_developer_input(wa_id):
+    """Get customer-agent messages missed by webhook since last interaction"""
+    
+    try:
+        # Get messages from WATI API
+        api_messages = fetch_wati_api_messages(wa_id, pages=5)
+        if not api_messages:
+            return ""
+        
+        # Get webhook-received messages
+        webhook_messages = get_webhook_received_messages(wa_id)
+        
+        # Find customer-to-agent messages that webhook missed
+        customer_to_agent_messages = find_customer_to_agent_messages(api_messages, webhook_messages, wa_id)
+        
+        if not customer_to_agent_messages:
+            return ""
+            
+        # Format for developer input
+        context_lines = []
+        for msg in customer_to_agent_messages[-20:]:  # Last 20 missed messages
+            timestamp = msg.get('createdDateTime', '')
+            text = msg.get('text', '').strip()
+            operator_name = msg.get('operatorName', '')
+            
+            if not text:
+                continue
+                
+            # Parse timestamp
+            timestamp_str = 'Unknown time'
+            if timestamp:
+                try:
+                    parsed_time = parse_timestamp(timestamp)
+                    if parsed_time:
+                        timestamp_str = parsed_time.strftime('%Y-%m-%d %H:%M')
+                except:
+                    pass
+            
+            # Determine message type
+            if operator_name in ['NULL', 'Bot ', 'None', '']:
+                context_lines.append(f"[{timestamp_str}] Cliente: {text}")
+            else:
+                context_lines.append(f"[{timestamp_str}] Agente ({operator_name}): {text}")
+        
+        if context_lines:
+            header = "=== MENSAJES ENTRE EL CLIENTE Y AGENTES HUMANOS ENVIADOS DESDE EL ULTIMO MENSAJE RECIBIDO POR EL ASISTENTE ==="
+            footer = "=== FIN DE MENSAJES PERDIDOS ==="
+            return "\n\n" + header + "\n" + "\n".join(context_lines) + "\n" + footer
+        
+        return ""
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to get missed customer-agent messages: {e}")
+        return ""
+
+def get_agent_context_for_developer_input(wa_id):
+    """DEPRECATED: Agent context now handled via one-time system injection"""
+    return ""
+
+def parse_timestamp(timestamp_str):
+    """Parse timestamp string to datetime object"""
+    try:
+        if not timestamp_str:
+            return None
+        # Handle various timestamp formats
+        dt = isoparse(timestamp_str)
+        # Ensure timezone aware datetime
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
 def format_agent_context_message(customer_to_agent_messages, api_messages):
-    """Format agent-customer interactions as a system message"""
+    """DEPRECATED: Format agent-customer interactions as a system message"""
+    
+    # CRITICAL FIX: Limit messages to prevent context overflow
+    MAX_MESSAGES_TO_INJECT = 50  # Limit to last 50 messages to prevent 400k token overflow
+    
+    print(f"[CONTEXT_LIMIT] Original messages: {len(customer_to_agent_messages)}, limiting to: {MAX_MESSAGES_TO_INJECT}")
+    
+    # Sort by timestamp and take only the most recent messages
+    sorted_messages = sorted(customer_to_agent_messages, key=lambda x: x.get('createdDateTime', ''), reverse=True)
+    limited_messages = sorted_messages[:MAX_MESSAGES_TO_INJECT]
+    
+    print(f"[CONTEXT_LIMIT] Using {len(limited_messages)} recent messages for context injection")
     
     # Group messages by conversation/assignedId
     conversations = {}
     
-    # First, collect all customer-to-agent messages
-    for msg in customer_to_agent_messages:
+    # First, collect limited customer-to-agent messages
+    for msg in limited_messages:
         assigned_id = msg.get('assignedId', 'unassigned')
         timestamp = msg.get('createdDateTime', '')
         
@@ -108,7 +346,7 @@ def inject_agent_context_to_thread(wa_id, context_message):
     print(f"[INJECTION] Injecting agent context for waId: {wa_id}")
     
     # Get thread ID from database
-    db_path = "thread_store.db"
+    db_path = "app/thread_store.db"
     
     try:
         if not os.path.exists(db_path):
@@ -130,44 +368,58 @@ def inject_agent_context_to_thread(wa_id, context_message):
         print(f"[DEBUG] Found thread_id: {thread_id} for waId: {wa_id}")
         conn.close()
         
-        # Add system message to OpenAI thread
+        # Add system message to OpenAI conversation using Responses API
         openai.api_key = config.OPENAI_API_KEY
-        print(f"[DEBUG] Attempting OpenAI API call to create message in thread: {thread_id}")
+        print(f"[DEBUG] Attempting OpenAI API call to create message item in conversation: {thread_id}")
         
-        response = openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",  # Use "user" role for context injection
-            content=context_message
-        )
+        # Get last response ID from local storage
+        from app.thread_store import get_last_response_id, save_response_id
+        previous_response_id = get_last_response_id(phone_number)
+        print(f"[DEBUG] Retrieved previous_response_id from local storage: {previous_response_id}")
+        
+        if previous_response_id:
+            response = openai.responses.create(
+                model="gpt-5",
+                previous_response_id=previous_response_id,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": context_message}]
+                    }
+                ],
+            )
+        else:
+            response = openai.responses.create(
+                model="gpt-5",
+                conversation=thread_id,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": context_message}]
+                    }
+                ],
+            )
+        
+        # Save the response ID for future continuation
+        save_response_id(phone_number, response.id)
+        print(f"[DEBUG] Saved response_id to local storage: {response.id}")
         
         # CRITICAL FIX: Verify the response and message creation
         if not response or not hasattr(response, 'id') or not response.id:
             print(f"[ERROR] OpenAI API call returned invalid response: {response}")
             return False
             
-        message_id = response.id
-        print(f"[DEBUG] OpenAI API returned message ID: {message_id}")
+        response_id = response.id
+        print(f"[DEBUG] OpenAI API returned response ID: {response_id}")
         
-        # CRITICAL FIX: Verify the message was actually created by retrieving it
-        try:
-            verification = openai.beta.threads.messages.retrieve(
-                thread_id=thread_id,
-                message_id=message_id
-            )
-            
-            if not verification or verification.id != message_id:
-                print(f"[ERROR] Message verification failed - message not found in thread")
-                print(f"[ERROR] Expected message ID: {message_id}, Got: {verification.id if verification else 'None'}")
-                return False
-                
-            print(f"[VERIFICATION] Message successfully verified in thread: {thread_id}")
-            
-        except Exception as verify_error:
-            print(f"[ERROR] Message verification failed: {str(verify_error)}")
-            return False
+        # With Responses API, verification is automatic
+        print(f"[DEBUG] Context injection completed using Responses API")
+        print(f"[VERIFICATION] Response successfully created in conversation: {thread_id}")
         
         print(f"[SUCCESS] Agent context injected and verified to thread: {thread_id}")
-        print(f"[MESSAGE] Message ID: {message_id}")
+        print(f"[RESPONSE] Response ID: {response_id}")
         
         return True
         
@@ -183,7 +435,7 @@ def inject_agent_context_to_thread(wa_id, context_message):
 def update_last_agent_context_check(wa_id):
     """Update the timestamp of last agent context check for this user"""
     
-    db_path = "thread_store.db"
+    db_path = "app/thread_store.db"
     
     try:
         conn = sqlite3.connect(db_path)

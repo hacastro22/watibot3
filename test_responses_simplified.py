@@ -73,7 +73,7 @@ async def test_responses_api():
         print(f"  Response preview: {response[:100]}...")
         
         # Check if previous_response_id was stored
-        prev_id = thread_store.get_previous_response_id(test_wa_id)
+        prev_id = thread_store.get_last_response_id(test_wa_id)
         if prev_id:
             print(f"✓ Previous response ID stored: {prev_id[:20]}...")
         else:
@@ -99,7 +99,7 @@ async def test_responses_api():
         print(f"  Response preview: {response[:100]}...")
         
         # Check if previous_response_id was updated
-        new_prev_id = thread_store.get_previous_response_id(test_wa_id)
+        new_prev_id = thread_store.get_last_response_id(test_wa_id)
         if new_prev_id and new_prev_id != prev_id:
             print(f"✓ Previous response ID updated: {new_prev_id[:20]}...")
         
