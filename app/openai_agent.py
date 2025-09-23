@@ -634,6 +634,25 @@ tools = [
             },
             "required": ["issue_type", "issue_description"]
         }
+    },
+    {
+        "type": "function",
+        "name": "handle_customer_transferencia_type_response",
+        "description": "Handle customer response when they clarify whether they used 'Transferencia UNI' or 'Transferencia 365'. Call this when customer responds to questions about their transfer type after 60 minutes of failed bank transfer validation. UNI transfers have limited business hours (Mon-Fri 9AM-5PM) and may require escalation to human agents.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phone_number": {
+                    "type": "string",
+                    "description": "Customer's phone number"
+                },
+                "response_text": {
+                    "type": "string", 
+                    "description": "Customer's response message about which transfer type they used"
+                }
+            },
+            "required": ["phone_number", "response_text"]
+        }
     }
 ]
 
@@ -977,6 +996,7 @@ available_functions = {
     "validate_bank_transfer": bank_transfer_tool.validate_bank_transfer,
     "start_bank_transfer_retry_process": bank_transfer_retry.start_bank_transfer_retry_process,
     "mark_customer_frustrated": bank_transfer_retry.mark_customer_frustrated,
+    "handle_customer_transferencia_type_response": bank_transfer_retry.handle_customer_transferencia_type_response,
     "trigger_compraclick_retry_for_missing_payment": compraclick_tool.trigger_compraclick_retry_for_missing_payment,
     "make_booking": booking_tool.make_booking,
     "send_email": email_service.send_email,

@@ -12,15 +12,67 @@ import json
 import logging
 import asyncio
 import random
-import threading
-from typing import Dict, Any, Optional
+import fcntl
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict
 from playwright.async_api import async_playwright, Page
 import mysql.connector
 from mysql.connector import Error as MySQLError
 from .database_client import get_db_connection
 from .wati_client import update_chat_status, send_wati_message
 from dotenv import load_dotenv
+
+# Process-safe lock to prevent concurrent bank sync sessions across workers/processes
+BANK_SYNC_LOCK_FILE = "/tmp/bank_sync.lock"
+_last_sync_time = None
+_sync_cooldown_seconds = 30  # Minimum time between sync operations
+
+class ProcessSafeLock:
+    """File-based lock that works across multiple processes/workers"""
+    
+    def __init__(self, lock_file_path):
+        self.lock_file_path = lock_file_path
+        self.lock_file = None
+    
+    async def __aenter__(self):
+        """Acquire the lock"""
+        logger.info(f"[LOCK] Attempting to acquire process-safe lock: {self.lock_file_path}")
+        
+        # Try to acquire lock with timeout
+        max_wait = 300  # 5 minutes maximum wait
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            try:
+                self.lock_file = open(self.lock_file_path, 'w')
+                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                logger.info(f"[LOCK] Successfully acquired process-safe lock")
+                return self
+            except (IOError, OSError) as e:
+                if self.lock_file:
+                    self.lock_file.close()
+                    self.lock_file = None
+                # Lock is held by another process, wait and retry
+                logger.info(f"[LOCK] Lock held by another process, waiting...")
+                await asyncio.sleep(5)  # Wait 5 seconds before retrying
+        
+        # Timeout reached
+        raise Exception(f"Failed to acquire process lock within {max_wait} seconds")
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Release the lock"""
+        if self.lock_file:
+            try:
+                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+                self.lock_file.close()
+                os.unlink(self.lock_file_path)
+                logger.info(f"[LOCK] Released process-safe lock")
+            except Exception as e:
+                logger.error(f"[LOCK] Error releasing lock: {e}")
+            finally:
+                self.lock_file = None
 
 # Load environment variables from .env file
 load_dotenv()
@@ -95,15 +147,73 @@ async def login_and_download_csv(page: Page, username: str, password: str) -> st
 
     # --- Login Process ---
     logger.info('Starting login process...')
+    
+    # Debug: Check page content before looking for login elements
+    logger.info('Checking page content after navigation...')
+    page_title = await page.title()
+    logger.info(f"Page title: {page_title}")
+    
+    # Check if page contains expected login elements
+    all_inputs = await page.locator('input').all()
+    logger.info(f"Found {len(all_inputs)} input elements on page")
+    
+    # Log all input element IDs/names for debugging
+    for i, input_element in enumerate(all_inputs):
+        try:
+            element_id = await input_element.get_attribute('id')
+            element_name = await input_element.get_attribute('name') 
+            element_type = await input_element.get_attribute('type')
+            logger.info(f"Input {i}: id='{element_id}', name='{element_name}', type='{element_type}'")
+        except Exception as e:
+            logger.warning(f"Could not inspect input element {i}: {e}")
+    
+    # Page loaded successfully - no screenshot needed for normal operation
+    
     await page.wait_for_selector('#productId', state='visible')
     await page.focus('#productId')
     await page.keyboard.type(username, delay=random.uniform(100, 200))
     await human_delay(page, 500, 1000)
 
-    await page.wait_for_selector('#pass', state='visible')
-    await page.focus('#pass')
-    await page.keyboard.type(password, delay=random.uniform(100, 200))
-    await human_delay(page, 1000, 2000)
+    # Before looking for password field, check if it exists
+    logger.info('Looking for password field...')
+    pass_field_exists = await page.locator('#pass').count() > 0
+    logger.info(f"Password field '#pass' exists: {pass_field_exists}")
+    
+    if not pass_field_exists:
+        # Try alternative selectors for password field
+        alternative_selectors = [
+            'input[type="password"]',
+            '#password',
+            '[name="password"]',
+            '[name="pass"]',
+            'input[name*="pass"]'
+        ]
+        
+        for selector in alternative_selectors:
+            try:
+                count = await page.locator(selector).count()
+                if count > 0:
+                    logger.info(f"Found password field with selector: {selector} (count: {count})")
+                    # Use this selector instead
+                    await page.wait_for_selector(selector, state='visible')
+                    await page.focus(selector)
+                    await page.keyboard.type(password, delay=random.uniform(100, 200))
+                    await human_delay(page, 1000, 2000)
+                    break
+            except Exception as e:
+                logger.debug(f"Selector {selector} failed: {e}")
+        else:
+            # If no password field found, take screenshot and raise error
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            no_pass_screenshot_path = f"no-password-field-{timestamp}.png"
+            await page.screenshot(path=no_pass_screenshot_path, full_page=True)
+            logger.error(f"No password field found. Screenshot saved to {no_pass_screenshot_path}")
+            raise Exception("Password field not found with any known selector")
+    else:
+        await page.wait_for_selector('#pass', state='visible')
+        await page.focus('#pass')
+        await page.keyboard.type(password, delay=random.uniform(100, 200))
+        await human_delay(page, 1000, 2000)
 
     logger.info('Clicking login button...')
     # INFINITE RETRY for login process
@@ -114,7 +224,22 @@ async def login_and_download_csv(page: Page, username: str, password: str) -> st
             logger.info(f"Login attempt #{login_retry_count}")
             await human_click(page, '#confirm')
             await page.wait_for_load_state('networkidle', timeout=60000)
-            logger.info('Login successful')
+            
+            # Verify we're actually logged in by checking the URL and page content
+            current_url = page.url
+            logger.info(f"Post-login URL: {current_url}")
+            
+            # Check if we're still on the login page (indicates login failure)
+            if 'showLogin.go' in current_url:
+                logger.warning(f"Still on login page after attempt #{login_retry_count}, login likely failed")
+                # Take a screenshot for debugging
+                timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+                screenshot_path = f"login-failed-{timestamp}.png"
+                await page.screenshot(path=screenshot_path, full_page=True)
+                logger.info(f"Login failure screenshot saved to {screenshot_path}")
+                raise Exception("Login failed - redirected back to login page")
+            
+            logger.info('Login successful - navigated away from login page')
             break
         except Exception as e:
             logger.error(f"Login attempt #{login_retry_count} failed: {e}")
@@ -139,10 +264,38 @@ async def login_and_download_csv(page: Page, username: str, password: str) -> st
 
     # --- Navigation and Download ---
     logger.info('Accessing account balance...')
+    
+    # Check current URL before attempting account access
+    current_url = page.url
+    logger.info(f"Current URL before account access: {current_url}")
+    
+    if 'showLogin.go' in current_url:
+        logger.error("ERROR: Still on login page! Session likely expired or invalid.")
+        # Take screenshot for debugging
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        screenshot_path = f"session-expired-{timestamp}.png"
+        await page.screenshot(path=screenshot_path, full_page=True)
+        logger.info(f"Session error screenshot saved to {screenshot_path}")
+        raise Exception("Session expired or invalid - redirected back to login page")
+    
     await human_click(page, 'button.bel-btn.bel-btn-tertiary.bel-btn-tertiary-active.bel-btn-tertiary-icon.bel-tooltip-generic')
     await human_delay(page, 3000, 4000)
 
     logger.info('Selecting month...')
+    
+    # Check URL again before trying to select month
+    current_url = page.url
+    logger.info(f"Current URL before month selection: {current_url}")
+    
+    if 'showLogin.go' in current_url:
+        logger.error("ERROR: Redirected to login page during account access!")
+        # Take screenshot for debugging
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        screenshot_path = f"redirected-to-login-{timestamp}.png"
+        await page.screenshot(path=screenshot_path, full_page=True)
+        logger.info(f"Redirect error screenshot saved to {screenshot_path}")
+        raise Exception("Redirected to login page during account access")
+    
     await human_click(page, '#selectMonthLabel')
     await human_delay(page, 1000, 2000)
     await human_click(page, '#selectMonthList .bel-option[index="1"]') # Select previous month
@@ -192,104 +345,124 @@ async def sync_bank_transfers() -> dict:
     """
     Main function to orchestrate the bank transfer sync process.
     INFINITE RETRY: Never give up on syncing bank transfers to avoid leaving customers hanging.
+    Uses global locking to prevent concurrent sessions that could be terminated by the bank.
     """
-    username = os.getenv('BAC_USERNAME')
-    password = os.getenv('BAC_PASSWORD')
+    global _last_sync_time
+    
+    async with ProcessSafeLock(BANK_SYNC_LOCK_FILE):
+        # Check cooldown period to prevent too frequent sync operations
+        now = datetime.now()
+        if _last_sync_time and (now - _last_sync_time).total_seconds() < _sync_cooldown_seconds:
+            remaining_cooldown = _sync_cooldown_seconds - (now - _last_sync_time).total_seconds()
+            logger.info(f"Bank sync in cooldown period. {remaining_cooldown:.1f} seconds remaining.")
+            return {
+                "success": True, 
+                "data": {"message": f"Sync skipped - cooldown active ({remaining_cooldown:.1f}s remaining)"}, 
+                "error": None
+            }
+        
+        logger.info("Starting bank transfer sync (with concurrency protection)")
+        
+        username = os.getenv('BAC_USERNAME')
+        password = os.getenv('BAC_PASSWORD')
 
-    if not username or not password:
-        error_msg = "BAC credentials not found in environment variables"
-        logger.error(error_msg)
-        return {"success": False, "data": {}, "error": error_msg}
+        if not username or not password:
+            error_msg = "BAC credentials not found in environment variables"
+            logger.error(error_msg)
+            return {"success": False, "data": {}, "error": error_msg}
 
     # INFINITE RETRY LOOP - Never give up on bank transfer sync
-    retry_count = 0
+        retry_count = 0
     while True:
-        retry_count += 1
-        logger.info(f"Bank transfer sync attempt #{retry_count}")
-        
-        async with async_playwright() as p:
-            browser = None
-            try:
-                logger.info('Launching browser...')
-                browser = await p.chromium.launch(
-                    headless=True, 
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-web-security',
-                        '--disable-features=IsolateOrigins',
-                        '--disable-site-isolation-trials',
-                    ]
-                )
-
-                context = await browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    extra_http_headers={
-                        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8'
-                    }
-                )
-                page = await context.new_page()
-
-                # --- Browser Evasion Setup from JS example ---
-                await page.add_init_script("""
-                    () => {
-                        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                        window.chrome = { runtime: {} };
-                        Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es', 'en-US', 'en'] });
-                        window.Notification = { permission: 'default' };
-                        Object.defineProperty(navigator, 'plugins', { 
-                            get: () => [ { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' } ]
-                        });
-                    }
-                """)
-                
-                client = await context.new_cdp_session(page)
-                await client.send('Page.setDownloadBehavior', {'behavior': 'allow', 'downloadPath': DOWNLOAD_PATH})
-
-                file_path = await login_and_download_csv(page, username, password)
-                
-                # Perform logout within the main try block if login was successful
+            retry_count += 1
+            logger.info(f"Bank transfer sync attempt #{retry_count}")
+            
+            async with async_playwright() as p:
+                browser = None
                 try:
-                    logger.info('Logging out...')
-                    await human_click(page, 'p.bel-typography.bel-typography-p.header-text-color.padding-right-xs', options={'timeout': 10000})
-                    await page.wait_for_load_state('networkidle', timeout=30000)
-                    logger.info('Logout successful')
+                    logger.info('Launching browser...')
+                    browser = await p.chromium.launch(
+                        headless=True, 
+                        args=[
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-web-security',
+                            '--disable-features=IsolateOrigins',
+                            '--disable-site-isolation-trials',
+                        ]
+                    )
+
+                    context = await browser.new_context(
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        extra_http_headers={
+                            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8'
+                        }
+                    )
+                    page = await context.new_page()
+
+                    # --- Browser Evasion Setup from JS example ---
+                    await page.add_init_script("""
+                        () => {
+                            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                            window.chrome = { runtime: {} };
+                            Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es', 'en-US', 'en'] });
+                            window.Notification = { permission: 'default' };
+                            Object.defineProperty(navigator, 'plugins', { 
+                                get: () => [ { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' } ]
+                            });
+                        }
+                    """)
+                    
+                    client = await context.new_cdp_session(page)
+                    await client.send('Page.setDownloadBehavior', {'behavior': 'allow', 'downloadPath': DOWNLOAD_PATH})
+
+                    file_path = await login_and_download_csv(page, username, password)
+                    
+                    # Perform logout within the main try block if login was successful
+                    try:
+                        logger.info('Logging out...')
+                        await human_click(page, 'p.bel-typography.bel-typography-p.header-text-color.padding-right-xs', options={'timeout': 10000})
+                        await page.wait_for_load_state('networkidle', timeout=30000)
+                        logger.info('Logout successful')
+                    except Exception as e:
+                        logger.error(f'Logout failed: {e}')
+
+                    # Process data after logging out
+                    result = await process_csv_and_insert_to_db(file_path)
+                    
+                    # Update last sync time on success
+                    _last_sync_time = datetime.now()
+                    
+                    conclusion = f"Successfully synced {result['rows_inserted']} new bank transfers."
+                    logger.info(conclusion)
+                    return {
+                        "success": True,
+                        "data": {
+                            "rows_inserted": result['rows_inserted'],
+                            "rows_skipped": result['rows_skipped'],
+                            "last_sync_timestamp": datetime.utcnow().isoformat()
+                        },
+                        "error": ""
+                    }
+
                 except Exception as e:
-                    logger.error(f'Logout failed: {e}')
-
-                # Process data after logging out
-                result = await process_csv_and_insert_to_db(file_path)
-                
-                conclusion = f"Successfully synced {result['rows_inserted']} new bank transfers."
-                logger.info(conclusion)
-                return {
-                    "success": True,
-                    "data": {
-                        "rows_inserted": result['rows_inserted'],
-                        "rows_skipped": result['rows_skipped'],
-                        "last_sync_timestamp": datetime.utcnow().isoformat()
-                    },
-                    "error": ""
-                }
-
-            except Exception as e:
-                logger.exception(f"Bank transfer sync attempt #{retry_count} failed: {e}")
-                if 'page' in locals() and page and not page.is_closed():
-                    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-                    screenshot_path = f"error-{timestamp}.png"
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    logger.info(f"Error screenshot saved to {screenshot_path}")
-                    logger.error(f"Current URL at error: {page.url}")
-                
-                # Wait 10 seconds before retrying
-                logger.info(f"Waiting 10 seconds before retry #{retry_count + 1}...")
-                await asyncio.sleep(10)
-                
-            finally:
-                if browser:
-                    await browser.close()
-                    logger.info('Browser closed')
+                    logger.exception(f"Bank transfer sync attempt #{retry_count} failed: {e}")
+                    if 'page' in locals() and page and not page.is_closed():
+                        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+                        screenshot_path = f"error-{timestamp}.png"
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.info(f"Error screenshot saved to {screenshot_path}")
+                        logger.error(f"Current URL at error: {page.url}")
+                    
+                    # Wait 10 seconds before retrying
+                    logger.info(f"Waiting 10 seconds before retry #{retry_count + 1}...")
+                    await asyncio.sleep(10)
+                    
+                finally:
+                    if browser:
+                        await browser.close()
+                        logger.info('Browser closed')
                 
                 # Continue the infinite retry loop
 

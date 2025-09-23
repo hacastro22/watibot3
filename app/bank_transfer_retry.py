@@ -9,6 +9,7 @@ import json
 import logging
 import asyncio
 import threading
+import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from .bank_transfer_tool import sync_bank_transfers, validate_bank_transfer
@@ -157,6 +158,19 @@ async def _execute_retry_process(phone_number: str) -> None:
             # Check if we've reached max attempts for current stage
             if customer_state["attempt_count"] >= max_attempts:
                 if stage < 3:
+                    # Special handling when transitioning from Stage 1 to Stage 2 (around 60 minutes)
+                    if stage == 1:
+                        logger.info(f"Stage 1 completed for {phone_number}, checking for Transferencia UNI vs 365")
+                        # Check if customer used Transferencia UNI instead of recommended Transferencia 365
+                        uni_check_result = await _check_transferencia_uni_vs_365(phone_number, payment_data)
+                        if uni_check_result == "escalated":
+                            # Customer used UNI, case escalated
+                            return
+                        elif uni_check_result == "continue":
+                            # Customer used 365, continue retrying
+                            pass
+                        # If no response or other result, continue with Stage 2 anyway
+                    
                     # Move to next stage
                     customer_state["stage"] = stage + 1
                     customer_state["attempt_count"] = 0
@@ -232,6 +246,7 @@ async def _attempt_validation_and_booking(phone_number: str, payment_data: Dict[
             payment_method="Depósito BAC",
             payment_amount=payment_data["slip_amount"],
             payment_maker_name=booking_data["customer_name"],
+            wa_id=phone_number,  # Added missing wa_id parameter
             transfer_id=validation_result["transfer_id"],
             force_process=True,  # BYPASS time validation in retry mechanism
             extra_beds=booking_data.get("extra_beds", 0),
@@ -313,3 +328,281 @@ async def mark_customer_frustrated(phone_number: str) -> None:
         
     except Exception as e:
         logger.exception(f"Failed to mark customer {phone_number} as frustrated: {e}")
+
+
+async def _check_transferencia_uni_vs_365(phone_number: str, payment_data: Dict[str, Any]) -> str:
+    """
+    Check if customer used Transferencia UNI vs recommended Transferencia 365.
+    Called after 60 minutes (Stage 1 completion) if transfer still not found.
+    
+    Returns:
+        "escalated" - Customer used UNI, case escalated to human
+        "continue" - Customer used 365, continue retrying
+        "no_response" - No response from customer, continue anyway
+    """
+    try:
+        from pytz import timezone
+        from .wati_client import send_wati_message
+        
+        logger.info(f"Checking Transferencia UNI vs 365 for {phone_number} after 60 minutes")
+        
+        # Get El Salvador timezone for UNI time window validation
+        el_salvador_tz = timezone("America/El_Salvador")
+        now_sv = datetime.now(el_salvador_tz)
+        
+        # Construct clarification message
+        uni_clarification_message = (
+            f"Hemos estado verificando su transferencia bancaria durante los últimos 60 minutos, "
+            f"pero aún no aparece reflejada en nuestro sistema bancario.\n\n"
+            f"Para poder ayudarle mejor, necesitamos confirmar qué tipo de transferencia utilizó:\n\n"
+            f"🔹 **¿Utilizó 'Transferencia 365'** (la que recomendamos, disponible 24/7)?\n"
+            f"🔹 **¿O utilizó 'Transferencia UNI'** (que tiene horarios limitados)?\n\n"
+            f"⏰ **IMPORTANTE:** Transferencia UNI solo procesa transferencias de lunes a viernes "
+            f"de 9:00 AM a 5:00 PM. Si hizo la transferencia fuera de este horario o cerca del cierre, "
+            f"podría aparecer hasta el siguiente día hábil.\n\n"
+            f"Por favor, responda con:\n"
+            f"- '365' si usó Transferencia 365\n"
+            f"- 'UNI' si usó Transferencia UNI\n\n"
+            f"Esto nos ayudará a darle el mejor seguimiento a su caso. 🏦"
+        )
+        
+        # Send clarification message based on channel type
+        if phone_number.isdigit() and len(phone_number) >= 10:
+            # WATI customer
+            await send_wati_message(phone_number, uni_clarification_message)
+            logger.info(f"Sent WATI UNI vs 365 clarification to {phone_number}")
+        else:
+            # ManyChat customer
+            from app.clients import manychat_client
+            
+            # Try both FB and IG versions since we don't know which channel
+            message_sent = False
+            try:
+                await manychat_client.send_text_message(phone_number, uni_clarification_message)
+                logger.info(f"Sent ManyChat FB UNI vs 365 clarification to {phone_number}")
+                message_sent = True
+            except Exception as fb_error:
+                try:
+                    await manychat_client.send_ig_text_message(phone_number, uni_clarification_message)
+                    logger.info(f"Sent ManyChat IG UNI vs 365 clarification to {phone_number}")
+                    message_sent = True
+                except Exception as ig_error:
+                    logger.error(f"Failed to send ManyChat clarification to {phone_number}: FB={fb_error}, IG={ig_error}")
+            
+            if not message_sent:
+                logger.warning(f"Could not send UNI vs 365 clarification to ManyChat customer {phone_number}")
+        
+        # Message sent successfully - the customer will respond through normal chat
+        # The OpenAI agent will handle the response using handle_customer_transferencia_type_response
+        # For now, continue with Stage 2 while waiting for response
+        logger.info(f"Transferencia UNI vs 365 clarification sent to {phone_number}, continuing with Stage 2")
+        return "no_response"
+        
+    except Exception as e:
+        logger.exception(f"Error checking Transferencia UNI vs 365 for {phone_number}: {e}")
+        return "no_response"
+
+
+async def _handle_transferencia_uni_escalation(phone_number: str, payment_data: Dict[str, Any]) -> None:
+    """
+    Handle escalation for customers who used Transferencia UNI.
+    Sends explanation and escalates to human agent.
+    """
+    try:
+        from .wati_client import send_wati_message, transfer_to_agent
+        
+        logger.info(f"Escalating Transferencia UNI case for {phone_number}")
+        
+        # Explain UNI limitations and escalation
+        uni_escalation_message = (
+            f"Entendemos que utilizó **Transferencia UNI** para realizar su pago. 🏦\n\n"
+            f"📋 **Información importante sobre Transferencia UNI:**\n"
+            f"• Solo procesa transferencias de **lunes a viernes, 9:00 AM - 5:00 PM** (hora de El Salvador)\n"
+            f"• Si transfirió cerca del cierre o fuera del horario, aparecerá hasta el siguiente día hábil\n"
+            f"• En caso de feriados, puede retrasarse aún más\n\n"
+            f"✅ **Para brindarle el mejor servicio, hemos escalado su caso a un agente humano** "
+            f"quien hará seguimiento personalizado a su transferencia y finalizará su reserva tan pronto "
+            f"como aparezca en el sistema.\n\n"
+            f"Un agente se comunicará con usted para coordinar el proceso. "
+            f"Gracias por su comprensión y paciencia. 🙏"
+        )
+        
+        # Send escalation message based on channel type
+        if phone_number.isdigit() and len(phone_number) >= 10:
+            # WATI customer
+            await send_wati_message(phone_number, uni_escalation_message)
+            logger.info(f"Sent WATI escalation message to {phone_number}")
+        else:
+            # ManyChat customer - use ManyChat client
+            from app.clients import manychat_client
+            
+            # Try both FB and IG versions since we don't know which channel
+            message_sent = False
+            try:
+                await manychat_client.send_text_message(phone_number, uni_escalation_message)
+                logger.info(f"Sent ManyChat FB escalation message to {phone_number}")
+                message_sent = True
+            except Exception as fb_error:
+                try:
+                    await manychat_client.send_ig_text_message(phone_number, uni_escalation_message)
+                    logger.info(f"Sent ManyChat IG escalation message to {phone_number}")
+                    message_sent = True
+                except Exception as ig_error:
+                    logger.error(f"Failed to send ManyChat escalation message to {phone_number}: FB={fb_error}, IG={ig_error}")
+            
+            if not message_sent:
+                logger.warning(f"Could not send escalation message to ManyChat customer {phone_number}")
+        
+        # Transfer to human agent based on channel type
+        try:
+            # Detect channel type based on phone_number format
+            # WATI uses phone numbers like "50378308239"
+            # ManyChat uses subscriber IDs (different format)
+            if phone_number.isdigit() and len(phone_number) >= 10:
+                # WATI customer - use WATI-specific transfer
+                from .wati_client import assign_operator, update_chat_status
+                
+                await update_chat_status(phone_number, "PENDING")
+                await assign_operator(phone_number, "reservasoficina@lashojasresort.com")
+                logger.info(f"Transferred WATI Transferencia UNI case {phone_number} to reservasoficina@lashojasresort.com")
+            else:
+                # ManyChat customer - use ManyChat transfer (mark as open + tag)
+                from app.clients import manychat_client
+                
+                # Mark conversation as open for human agent attention
+                # Try both FB and IG versions since we don't know which channel
+                try:
+                    await manychat_client.mark_conversation_as_open(phone_number)
+                    logger.info(f"Marked ManyChat FB conversation {phone_number} as open for Transferencia UNI case")
+                except Exception as fb_error:
+                    try:
+                        await manychat_client.mark_ig_conversation_as_open(phone_number)
+                        logger.info(f"Marked ManyChat IG conversation {phone_number} as open for Transferencia UNI case")
+                    except Exception as ig_error:
+                        logger.error(f"Failed to mark ManyChat conversation {phone_number} as open: FB={fb_error}, IG={ig_error}")
+                
+                # Add tag for escalation tracking
+                try:
+                    await manychat_client.add_tag_to_subscriber(phone_number, "transferencia_uni_escalation")
+                    logger.info(f"Tagged ManyChat customer {phone_number} for Transferencia UNI escalation")
+                except Exception as tag_error:
+                    logger.error(f"Failed to tag ManyChat customer {phone_number}: {tag_error}")
+                
+                logger.info(f"Transferred ManyChat Transferencia UNI case {phone_number} using standard ManyChat transfer")
+                
+        except Exception as transfer_error:
+            logger.error(f"Failed to transfer {phone_number} to agent: {transfer_error}")
+            # Fallback: escalate using existing method
+            await _escalate_to_human(phone_number, "Transferencia UNI - requires human tracking")
+        
+        # Remove from retry state
+        retry_state = _load_retry_state()
+        if phone_number in retry_state:
+            del retry_state[phone_number]
+            _save_retry_state(retry_state)
+            logger.info(f"Removed {phone_number} from retry state due to UNI escalation")
+            
+    except Exception as e:
+        logger.exception(f"Error handling Transferencia UNI escalation for {phone_number}: {e}")
+
+
+async def _handle_transferencia_365_continue(phone_number: str) -> None:
+    """
+    Handle customer who confirmed they used Transferencia 365.
+    Send reassurance and continue retrying.
+    """
+    try:
+        from .wati_client import send_wati_message
+        
+        logger.info(f"Customer {phone_number} confirmed using Transferencia 365, continuing retries")
+        
+        # Send reassurance message
+        reassurance_message = (
+            f"Perfecto, gracias por confirmar que utilizó **Transferencia 365**. 🌟\n\n"
+            f"Como usó el método recomendado (disponible 24/7), continuaremos verificando "
+            f"automáticamente su transferencia hasta que aparezca en el sistema.\n\n"
+            f"✅ **Seguiremos intentando cada 30 minutos** para finalizar su reserva "
+            f"tan pronto como el banco actualice la información.\n\n"
+            f"Le notificaremos inmediatamente cuando su pago sea confirmado. "
+            f"No necesita hacer nada más por su parte. 🙏"
+        )
+        
+        # Send reassurance message based on channel type
+        if phone_number.isdigit() and len(phone_number) >= 10:
+            # WATI customer
+            await send_wati_message(phone_number, reassurance_message)
+            logger.info(f"Sent WATI Transferencia 365 reassurance to {phone_number}")
+        else:
+            # ManyChat customer
+            from app.clients import manychat_client
+            
+            # Try both FB and IG versions since we don't know which channel
+            message_sent = False
+            try:
+                await manychat_client.send_text_message(phone_number, reassurance_message)
+                logger.info(f"Sent ManyChat FB Transferencia 365 reassurance to {phone_number}")
+                message_sent = True
+            except Exception as fb_error:
+                try:
+                    await manychat_client.send_ig_text_message(phone_number, reassurance_message)
+                    logger.info(f"Sent ManyChat IG Transferencia 365 reassurance to {phone_number}")
+                    message_sent = True
+                except Exception as ig_error:
+                    logger.error(f"Failed to send ManyChat reassurance to {phone_number}: FB={fb_error}, IG={ig_error}")
+            
+            if not message_sent:
+                logger.warning(f"Could not send Transferencia 365 reassurance to ManyChat customer {phone_number}")
+        
+    except Exception as e:
+        logger.exception(f"Error sending Transferencia 365 reassurance to {phone_number}: {e}")
+
+
+async def handle_customer_transferencia_type_response(phone_number: str, response_text: str) -> str:
+    """
+    Handle customer response about which transferencia type they used.
+    This should be called by the OpenAI agent when customer responds to the UNI vs 365 question.
+    
+    Args:
+        phone_number: Customer's phone number
+        response_text: Customer's response message
+    
+    Returns:
+        "uni_escalated" - Customer used UNI, case escalated
+        "365_continue" - Customer used 365, retries continue  
+        "unclear" - Response unclear, continue with retries
+    """
+    try:
+        logger.info(f"Processing transferencia type response from {phone_number}: {response_text}")
+        
+        response_lower = response_text.lower().strip()
+        
+        # Check for UNI keywords
+        uni_keywords = ["uni", "transferencia uni", "usé uni", "use uni", "fue uni"]
+        if any(keyword in response_lower for keyword in uni_keywords):
+            logger.info(f"Customer {phone_number} confirmed using Transferencia UNI")
+            
+            # Get payment data from retry state
+            retry_state = _load_retry_state()
+            customer_state = retry_state.get(phone_number, {})
+            payment_data = customer_state.get("payment_data", {})
+            
+            # Escalate UNI case
+            await _handle_transferencia_uni_escalation(phone_number, payment_data)
+            return "uni_escalated"
+        
+        # Check for 365 keywords
+        three65_keywords = ["365", "transferencia 365", "usé 365", "use 365", "fue 365", "trescientos sesenta cinco"]
+        if any(keyword in response_lower for keyword in three65_keywords):
+            logger.info(f"Customer {phone_number} confirmed using Transferencia 365")
+            
+            # Send reassurance and continue retries
+            await _handle_transferencia_365_continue(phone_number)
+            return "365_continue"
+        
+        # Unclear response - log and continue with retries anyway
+        logger.info(f"Unclear transferencia type response from {phone_number}, continuing with retries")
+        return "unclear"
+        
+    except Exception as e:
+        logger.exception(f"Error handling transferencia type response from {phone_number}: {e}")
+        return "unclear"
