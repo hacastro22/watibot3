@@ -56,8 +56,8 @@ class MessageHumanizer:
         try:
             logger.info(f"Humanizing message: {bare_bones_message[:100]}...")
             
-            # Send just the bare bones message - system instructions contain all guidance
-            user_prompt = bare_bones_message
+            # Add clear context that this is a message to be humanized
+            user_prompt = f"Please humanize this customer service message while preserving the exact perspective and role relationships:\n\n{bare_bones_message}"
 
             # Call GPT-4.1 for humanization
             response = await self.openai_client.chat.completions.create(

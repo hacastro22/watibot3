@@ -14,7 +14,9 @@ ALLOWED_RECIPIENTS = {
     "promociones@lashojasresort.com",
     "sbartenfeld@lashojasresort.com",
     "acienfuegos@lashojasresort.com",
-    "reservas@lashojasresort.com"
+    "reservas@lashojasresort.com",
+    "lnajera@lashojasresort.com",
+    "recursoshumanos@lashojasresort.com"
 }
 
 

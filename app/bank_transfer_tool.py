@@ -89,6 +89,44 @@ DOWNLOAD_PATH = '/tmp/bank_transfers'
 if not os.path.exists(DOWNLOAD_PATH):
     os.makedirs(DOWNLOAD_PATH)
 
+# --- Playwright Browser Auto-Recovery ---
+def check_playwright_browsers():
+    """Check if Playwright browsers are installed."""
+    import subprocess
+    cache_dir = Path.home() / '.cache' / 'ms-playwright'
+    chromium_dirs = list(cache_dir.glob('chromium-*')) if cache_dir.exists() else []
+    return len(chromium_dirs) > 0
+
+def reinstall_playwright_browsers():
+    """Automatically reinstall Playwright browsers if missing."""
+    import subprocess
+    try:
+        logger.warning("[PLAYWRIGHT_RECOVERY] Browsers missing! Attempting auto-install...")
+        # Get the venv python path
+        venv_python = Path(__file__).parent.parent / 'venv' / 'bin' / 'python'
+        
+        if venv_python.exists():
+            result = subprocess.run(
+                [str(venv_python), '-m', 'playwright', 'install', 'chromium'],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                logger.info("[PLAYWRIGHT_RECOVERY] Successfully reinstalled Chromium browser!")
+                return True
+            else:
+                logger.error(f"[PLAYWRIGHT_RECOVERY] Failed to install: {result.stderr}")
+                return False
+        else:
+            logger.error(f"[PLAYWRIGHT_RECOVERY] venv python not found at {venv_python}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[PLAYWRIGHT_RECOVERY] Auto-install failed: {e}")
+        return False
+
 # --- Helper Functions for Human-like Interaction ---
 
 async def human_delay(page: Page, min_delay=1000, max_delay=2000):
@@ -447,7 +485,21 @@ async def sync_bank_transfers() -> dict:
                     }
 
                 except Exception as e:
+                    error_message = str(e)
                     logger.exception(f"Bank transfer sync attempt #{retry_count} failed: {e}")
+                    
+                    # Check if it's a Playwright browser missing error
+                    if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
+                        logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error!")
+                        
+                        # Attempt auto-recovery
+                        if reinstall_playwright_browsers():
+                            logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Retrying immediately...")
+                            await asyncio.sleep(2)  # Short delay before retry
+                            continue
+                        else:
+                            logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed! Continuing with normal retry...")
+                    
                     if 'page' in locals() and page and not page.is_closed():
                         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
                         screenshot_path = f"error-{timestamp}.png"

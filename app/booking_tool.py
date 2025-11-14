@@ -561,16 +561,24 @@ def _calculate_booking_total(
         adults_paying = adults  # Start with all adults paying
         promotion_details = {"type": "none", "adults_free": 0, "adults_paying": adults}
         
-        # Apply 5x4 Pasadía promotion: For every 5 adults, 1 is free (max 2 free)
-        if package_type == "Pasadía" and adults >= 5:
+        # Apply 5x4 Pasadía promotion: For every 5 adults, 1 is free
+        # CRITICAL: Only applies when adult rate is ABOVE $24.00
+        # RULES: Groups < 20: max 2 free | Groups >= 20: unlimited free
+        if package_type == "Pasadía" and adults >= 5 and adult_rate > 24.00:
             potential_free = adults // 5  # How many could be free
-            actual_free = min(potential_free, 2)  # Max 2 free
+            # Apply cap based on group size
+            if adults < 20:
+                actual_free = min(potential_free, 2)  # Max 2 free for groups < 20
+                cap_note = "(máximo 2)"
+            else:
+                actual_free = potential_free  # Unlimited for groups >= 20
+                cap_note = "(sin límite para grupos grandes)"
             adults_paying = adults - actual_free
             promotion_details = {
                 "type": "5x4_pasadia",
                 "adults_free": actual_free,
                 "adults_paying": adults_paying,
-                "note": f"Promoción 5x4: {actual_free} pase(s) gratis (máximo 2)"
+                "note": f"Promoción 5x4: {actual_free} pase(s) gratis {cap_note}"
             }
         
         # Calculate base totals with promotion applied
@@ -1202,6 +1210,18 @@ async def _make_booking_api_call(
     # Add customer instructions if provided
     if customer_instructions and customer_instructions.strip():
         comment_parts.append(f"Instrucciones especiales: {customer_instructions.strip()}")
+    
+    # Check if Paquete Romántico is booked in Habitación Doble (rooms 1A-14A)
+    # and add suggestion to move to Bungalow Matrimonial for guest comfort
+    if package_type == "Romántico" and isinstance(selected_room, str) and selected_room.endswith('A'):
+        try:
+            # Extract room number from format like "10A"
+            room_num = int(selected_room[:-1])
+            if 1 <= room_num <= 14:
+                comment_parts.append("SUGERENCIA: Intentar mover esta reserva a un Bungalow Matrimonial para mayor comodidad del huésped, ya que Habitación Doble no es ideal para Paquete Romántico")
+        except (ValueError, IndexError):
+            # If parsing fails, skip this check
+            pass
     
     # Join all parts with " | " separator
     commenthotel_content = " | ".join(comment_parts)

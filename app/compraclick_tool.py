@@ -29,6 +29,45 @@ DOWNLOAD_PATH = '/tmp/compraclick'
 if not os.path.exists(DOWNLOAD_PATH):
     os.makedirs(DOWNLOAD_PATH)
 
+# --- Playwright Browser Auto-Recovery ---
+def check_playwright_browsers():
+    """Check if Playwright browsers are installed."""
+    from pathlib import Path
+    cache_dir = Path.home() / '.cache' / 'ms-playwright'
+    chromium_dirs = list(cache_dir.glob('chromium-*')) if cache_dir.exists() else []
+    return len(chromium_dirs) > 0
+
+def reinstall_playwright_browsers():
+    """Automatically reinstall Playwright browsers if missing."""
+    import subprocess
+    from pathlib import Path
+    try:
+        logger.warning("[PLAYWRIGHT_RECOVERY] Browsers missing! Attempting auto-install...")
+        # Get the venv python path
+        venv_python = Path(__file__).parent.parent / 'venv' / 'bin' / 'python'
+        
+        if venv_python.exists():
+            result = subprocess.run(
+                [str(venv_python), '-m', 'playwright', 'install', 'chromium'],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                logger.info("[PLAYWRIGHT_RECOVERY] Successfully reinstalled Chromium browser!")
+                return True
+            else:
+                logger.error(f"[PLAYWRIGHT_RECOVERY] Failed to install: {result.stderr}")
+                return False
+        else:
+            logger.error(f"[PLAYWRIGHT_RECOVERY] venv python not found at {venv_python}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[PLAYWRIGHT_RECOVERY] Auto-install failed: {e}")
+        return False
+
 async def sync_compraclick_payments() -> dict:
     """
     Synchronizes CompraClick payments by downloading the report and updating the database.
@@ -80,8 +119,30 @@ async def sync_compraclick_payments() -> dict:
                 await logout(page)
                 await browser.close()
     except Exception as e:
-        logger.exception("Failed to initialize browser for CompraClick sync")
-        return {"success": False, "data": {}, "error": f"Browser initialization failed: {e}"}
+        error_message = str(e)
+        logger.exception(f"Failed to initialize browser for CompraClick sync: {error_message}")
+        
+        # Check if it's a Playwright browser missing error
+        if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
+            logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick sync!")
+            
+            # Attempt auto-recovery
+            if reinstall_playwright_browsers():
+                logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Please retry the sync.")
+                return {
+                    "success": False, 
+                    "data": {}, 
+                    "error": "Browser was missing but has been auto-installed. Please retry the sync."
+                }
+            else:
+                logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed!")
+                return {
+                    "success": False, 
+                    "data": {}, 
+                    "error": "Browser missing and auto-recovery failed. Please contact support."
+                }
+        
+        return {"success": False, "data": {}, "error": f"Browser initialization failed: {error_message}"}
 
 async def login_and_download_report(page: Page, email: str, password: str) -> str:
     """Logs in, navigates to sales, and downloads the transaction report."""
@@ -881,8 +942,30 @@ async def create_compraclick_link(customer_name: str, payment_amount: float, cal
                     logger.info("Browser closed")
     
     except Exception as e:
-        logger.exception(f"Failed to initialize browser automation: {str(e)}")
-        return {"success": False, "link": "", "error": f"Browser automation initialization failed: {str(e)}"}
+        error_message = str(e)
+        logger.exception(f"Failed to initialize browser automation: {error_message}")
+        
+        # Check if it's a Playwright browser missing error
+        if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
+            logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick tool!")
+            
+            # Attempt auto-recovery
+            if reinstall_playwright_browsers():
+                logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Please retry the operation.")
+                return {
+                    "success": False, 
+                    "link": "", 
+                    "error": "Browser was missing but has been auto-installed. Please try again in a moment."
+                }
+            else:
+                logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed!")
+                return {
+                    "success": False, 
+                    "link": "", 
+                    "error": "Browser missing and auto-recovery failed. Please contact support."
+                }
+        
+        return {"success": False, "link": "", "error": f"Browser automation initialization failed: {error_message}"}
 
 
 async def authenticate_and_navigate(page: Page, email: str, password: str) -> Optional[str]:

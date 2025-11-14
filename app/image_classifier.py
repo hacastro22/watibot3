@@ -11,6 +11,8 @@ import os
 import json
 import logging
 import base64
+import asyncio
+import httpx
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
 
@@ -20,10 +22,15 @@ logger = logging.getLogger(__name__)
 # Initialize OpenAI client
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Import tools from openai_agent to enable dynamic module loading and other capabilities
+from . import openai_agent
+
 async def classify_image_with_context(
     image_path: str, 
     conversation_context: str,
-    wa_id: str
+    wa_id: str,
+    caption: str = None,
+    reply_context_id: str = None
 ) -> Dict[str, Any]:
     """
     Classifies an uploaded image using both image content and conversation context.
@@ -155,7 +162,7 @@ async def classify_image_with_context(
             # If it's a general inquiry, handle it directly with Responses API
             if classification == "general_inquiry":
                 direct_response = await handle_general_inquiry_image(
-                    image_path, wa_id, reasoning, parsed_result.get("visual_indicators", [])
+                    image_path, wa_id, reasoning, parsed_result.get("visual_indicators", []), caption, reply_context_id
                 )
                 return {
                     "success": True,
@@ -204,7 +211,7 @@ async def classify_image_with_context(
             "error": f"Classification error: {str(e)}"
         }
 
-async def handle_general_inquiry_image(image_path: str, wa_id: str, classification_reasoning: str, visual_indicators: List[str]) -> Dict[str, Any]:
+async def handle_general_inquiry_image(image_path: str, wa_id: str, classification_reasoning: str, visual_indicators: List[str], caption: str = None, reply_context_id: str = None) -> Dict[str, Any]:
     """
     Handles general inquiry images by sending them directly to GPT-5 via Responses API
     with full conversation context and system instructions.
@@ -214,24 +221,46 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
         wa_id: WhatsApp ID for the user
         classification_reasoning: Why this was classified as general inquiry
         visual_indicators: Visual elements detected in the image
+        caption: Optional text caption that came with the image
+        reply_context_id: Optional reply context ID from universal webhook
     
     Returns:
         dict: Response from the AI system or error information
     """
     try:
         from . import thread_store
+        from . import openai_agent
         
         # Get conversation context
         conversation_id = thread_store.get_conversation_id(wa_id)
         previous_response_id = thread_store.get_last_response_id(wa_id)
         
+        # Load system instructions (same as main agent)
+        system_instructions = openai_agent.build_classification_system_prompt()
+        logger.info(f"[IMAGE_CLASSIFIER] Loaded system instructions: {len(system_instructions)} chars")
+        
+        # Create new conversation if one doesn't exist (same logic as openai_agent.py)
         if not conversation_id:
-            logger.error(f"[IMAGE_CLASSIFIER] No conversation ID found for wa_id: {wa_id}")
-            return {
-                "success": False,
-                "response_text": "Error: No conversation context available",
-                "error": "No conversation ID found"
-            }
+            logger.info(f"[IMAGE_CLASSIFIER] No conversation ID found for wa_id: {wa_id}, creating new conversation")
+            from . import config
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.post(
+                    "https://api.openai.com/v1/conversations",
+                    headers={
+                        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={}
+                )
+                response.raise_for_status()
+                conv_data = response.json()
+                conversation_id = conv_data.get("id")
+                if not conversation_id:
+                    raise RuntimeError("Conversations API returned no id")
+            
+            thread_store.save_conversation_id(wa_id, conversation_id)
+            logger.info(f"[IMAGE_CLASSIFIER] Created new conversation {conversation_id} for wa_id: {wa_id}")
+            previous_response_id = None  # Fresh conversation has no previous response
         
         # Load and encode the image
         try:
@@ -246,46 +275,199 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                 "error": f"Image loading error: {str(e)}"
             }
         
-        # Create the input for Responses API
+        # Create the input for Responses API with correct image format
+        # Per OpenAI docs: image should come before text for better results
+        # Include caption and reply context if provided
+        if caption:
+            text_content = caption
+            logger.info(f"[IMAGE_CLASSIFIER] Image has caption: {caption!r}")
+        else:
+            text_content = "[Usuario envió una imagen]"
+        
+        # If this is a reply to a previous message, add context
+        if reply_context_id:
+            try:
+                # Try to retrieve the original message context
+                from .wati_client import get_original_message_context
+                original_context = await get_original_message_context(wa_id, reply_context_id)
+                if original_context:
+                    text_content = f"(Customer is replying to: \"{original_context}\") {text_content}"
+                    logger.info(f"[IMAGE_CLASSIFIER] Added reply context to image: {reply_context_id}")
+            except Exception as e:
+                logger.warning(f"[IMAGE_CLASSIFIER] Could not retrieve reply context: {e}")
+        
         image_input = {
-            "type": "message",
             "role": "user",
             "content": [
                 {
-                    "type": "text",
-                    "text": "[Usuario envió una imagen]"
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{img_base64}",
+                    "detail": "auto"
                 },
                 {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{img_base64}"
-                    }
+                    "type": "input_text",
+                    "text": text_content
                 }
             ]
         }
         
-        # Call Responses API using the same pattern as openai_agent.py
-        logger.info(f"[IMAGE_CLASSIFIER] Sending general inquiry image to Responses API for wa_id: {wa_id}")
+        # Call Responses API - ALWAYS include system instructions with images
+        logger.info(f"[IMAGE_CLASSIFIER] Sending general inquiry image to Responses API for wa_id: {wa_id} (with_caption: {bool(caption)}, with_reply_context: {bool(reply_context_id)})")
         
-        if previous_response_id:
-            # Continue existing conversation
-            response = await client.responses.create(
-                model="gpt-5",
-                previous_response_id=previous_response_id,
-                input=[image_input]
-            )
-        else:
-            # New conversation
-            response = await client.responses.create(
-                model="gpt-5",
-                conversation=conversation_id,
-                input=[image_input]
-            )
+        # Instructions must be a STRING for Responses API, not an array
+        instructions_text = system_instructions
+        
+        # Try to continue conversation with previous_response_id if available
+        # If that fails due to stale tool calls, we'll recover by creating a fresh conversation
+        recovery_attempts = 0
+        max_recovery_attempts = 2
+        
+        while recovery_attempts <= max_recovery_attempts:
+            try:
+                if previous_response_id and recovery_attempts == 0:
+                    # Continue existing conversation with instructions and tools
+                    logger.info(f"[IMAGE_CLASSIFIER] Continuing conversation with system instructions and tools")
+                    response = await client.responses.create(
+                        model="gpt-5",
+                        previous_response_id=previous_response_id,
+                        instructions=instructions_text,
+                        input=[image_input],
+                        tools=openai_agent.tools,
+                        max_output_tokens=4000
+                    )
+                else:
+                    # New conversation or recovery from error
+                    logger.info(f"[IMAGE_CLASSIFIER] Starting {'new' if recovery_attempts == 0 else 'fresh recovery'} conversation with system instructions and tools")
+                    response = await client.responses.create(
+                        model="gpt-5",
+                        conversation=conversation_id,
+                        instructions=instructions_text,
+                        input=[image_input],
+                        tools=openai_agent.tools,
+                        max_output_tokens=4000
+                    )
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                # Check if it's a tool call related error (stale tool call IDs)
+                if ("tool output" in error_str or "function call" in error_str or "no tool output found" in error_str):
+                    recovery_attempts += 1
+                    if recovery_attempts > max_recovery_attempts:
+                        logger.error(f"[IMAGE_CLASSIFIER] Too many recovery attempts ({recovery_attempts}), giving up")
+                        raise  # Re-raise to be caught by outer exception handler
+                    
+                    logger.warning(f"[IMAGE_CLASSIFIER] Tool call error (attempt {recovery_attempts}): {e}")
+                    logger.info(f"[IMAGE_CLASSIFIER] Creating fresh conversation for recovery")
+                    
+                    # Create fresh conversation (httpx already imported at module level)
+                    from . import config
+                    async with httpx.AsyncClient() as http_client:
+                        response_data = await http_client.post(
+                            "https://api.openai.com/v1/conversations",
+                            headers={
+                                "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                                "Content-Type": "application/json",
+                            },
+                            json={}
+                        )
+                        response_data.raise_for_status()
+                        conv_data = response_data.json()
+                        conversation_id = conv_data.get("id")
+                        if not conversation_id:
+                            raise RuntimeError("Conversations API returned no id")
+                    
+                    thread_store.save_conversation_id(wa_id, conversation_id)
+                    logger.info(f"[IMAGE_CLASSIFIER] Created fresh conversation {conversation_id} for recovery")
+                    
+                    # INJECT AGENT CONTEXT first for fresh conversation (same as openai_agent.py)
+                    from agent_context_injector import get_agent_context_for_system_injection
+                    agent_context_system_msg = get_agent_context_for_system_injection(wa_id)
+                    if agent_context_system_msg:
+                        logger.info(f"[IMAGE_CLASSIFIER] Injecting agent context for fresh recovery conversation {conversation_id}")
+                        agent_response = await client.responses.create(
+                            model="gpt-5",
+                            conversation=conversation_id,
+                            input=[{
+                                "type": "message",
+                                "role": "developer",
+                                "content": [{"type": "input_text", "text": agent_context_system_msg}]
+                            }],
+                            max_output_tokens=16
+                        )
+                        thread_store.save_response_id(wa_id, agent_response.id)
+                        logger.info(f"[IMAGE_CLASSIFIER] Agent context injected for fresh recovery conversation {conversation_id}")
+                    
+                    previous_response_id = None  # Force new conversation on retry
+                else:
+                    # Different error, don't retry
+                    raise
         
         # Save the response ID for future continuation
         thread_store.save_response_id(wa_id, response.id)
         
-        # Extract response text
+        # Handle tool calls (if any) - delegate to openai_agent's tool execution
+        # This allows images to trigger dynamic module loading and other tool capabilities
+        max_tool_rounds = 5
+        round_count = 0
+        
+        while round_count < max_tool_rounds:
+            # Check if there are tool calls in the response
+            tool_calls = openai_agent._iter_tool_calls(response)
+            if not tool_calls:
+                # No tool calls, we're done
+                break
+            
+            round_count += 1
+            logger.info(f"[IMAGE_CLASSIFIER] Tool call round {round_count}: {len(tool_calls)} tool(s) requested")
+            
+            # Execute tool calls
+            tool_results = []
+            for tc in tool_calls:
+                fn_name = getattr(tc, "name", None)
+                raw_args = getattr(tc, "arguments", None)
+                call_id = getattr(tc, "call_id", None) or getattr(tc, "id", None)
+                
+                logger.info(f"[IMAGE_CLASSIFIER] Executing tool: {fn_name}")
+                
+                # Parse arguments
+                args = openai_agent._tool_args(raw_args)
+                
+                # Execute the tool using openai_agent's available_functions map
+                try:
+                    import inspect
+                    func = openai_agent.available_functions.get(fn_name)
+                    if func:
+                        # Check if function is async
+                        if inspect.iscoroutinefunction(func):
+                            result = await func(**args)
+                        else:
+                            result = func(**args)
+                        output_str = openai_agent._coerce_output_str(result)
+                    else:
+                        output_str = f"Error: Unknown tool {fn_name}"
+                        logger.warning(f"[IMAGE_CLASSIFIER] Unknown tool: {fn_name}")
+                except Exception as e:
+                    output_str = f"Error executing {fn_name}: {str(e)}"
+                    logger.exception(f"[IMAGE_CLASSIFIER] Tool execution error: {fn_name}")
+                
+                tool_results.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output_str
+                })
+            
+            # Send tool results back to the API to continue the conversation
+            response = await client.responses.create(
+                model="gpt-5",
+                previous_response_id=response.id,
+                input=tool_results,
+                tools=openai_agent.tools,
+                max_output_tokens=4000
+            )
+            thread_store.save_response_id(wa_id, response.id)
+        
+        # Extract final response text
         response_text = ""
         if hasattr(response, 'output') and response.output:
             for item in response.output:

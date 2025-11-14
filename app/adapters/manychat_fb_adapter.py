@@ -13,6 +13,8 @@ from app.adapters.base_channel_adapter import ChannelAdapter
 from app.models.unified_message import MessageType, UnifiedMessage
 from app.clients import manychat_client
 from app.message_humanizer import humanize_response
+from app import conversation_log
+from app.utils.message_splitter import split_message, needs_splitting
 import logging
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,13 @@ class ManyChatFBAdapter(ChannelAdapter):
             # Nothing actionable
             return None
 
+        # Log customer message for context preservation
+        if text:
+            try:
+                conversation_log.log_message(user_id, "user", text, "facebook")
+            except Exception as e:
+                logger.error(f"[FB] Failed to log customer message: {e}")
+
         return UnifiedMessage(
             channel="facebook",
             user_id=user_id,
@@ -135,8 +144,10 @@ class ManyChatFBAdapter(ChannelAdapter):
                 return resp is not None
 
             # Default to text
-            if not message:
-                return False
+            # Empty message is OK - it means the tool already sent the content (e.g., send_menu_pdf)
+            if not message or message.strip() == "":
+                logger.info(f"[FB] Empty message for {user_id} - assuming content already sent via tool")
+                return True
             
             # Humanize the message before sending
             try:
@@ -146,8 +157,41 @@ class ManyChatFBAdapter(ChannelAdapter):
                 logger.error(f"[FB] Humanization failed, using original message: {e}")
                 humanized_message = message
             
-            resp = await manychat_client.send_text_message(user_id, humanized_message)
-            return resp is not None
+            # Check if message needs splitting due to ManyChat's 2000-char limit
+            if needs_splitting(humanized_message):
+                chunks = split_message(humanized_message)
+                logger.warning(f"[FB] Message exceeds 2000 chars ({len(humanized_message)} chars), splitting into {len(chunks)} parts")
+                
+                # Send each chunk sequentially
+                for idx, chunk in enumerate(chunks, 1):
+                    logger.info(f"[FB] Sending part {idx}/{len(chunks)} ({len(chunk)} chars)")
+                    resp = await manychat_client.send_text_message(user_id, chunk)
+                    if not resp:
+                        logger.error(f"[FB] Failed to send part {idx}/{len(chunks)}")
+                        return False
+                    # Small delay between chunks to maintain order
+                    if idx < len(chunks):
+                        import asyncio
+                        await asyncio.sleep(0.5)
+                
+                # Log the complete message (all chunks combined) for context preservation
+                try:
+                    conversation_log.log_message(user_id, "assistant", humanized_message, "facebook")
+                except Exception as e:
+                    logger.error(f"[FB] Failed to log assistant message: {e}")
+                
+                logger.info(f"[FB] Successfully sent all {len(chunks)} parts")
+                return True
+            else:
+                # Message fits within limit, send normally
+                # Log assistant response for context preservation
+                try:
+                    conversation_log.log_message(user_id, "assistant", humanized_message, "facebook")
+                except Exception as e:
+                    logger.error(f"[FB] Failed to log assistant message: {e}")
+                
+                resp = await manychat_client.send_text_message(user_id, humanized_message)
+                return resp is not None
         except Exception:
             # Let caller decide on retries
             return False

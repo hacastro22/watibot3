@@ -1,7 +1,9 @@
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# Load environment variables from .env file with explicit path
+load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env')
 
 # WATI Configuration
 WATI_API_KEY = os.getenv("WATI_API_KEY")
@@ -19,18 +21,6 @@ DB_HOST = os.getenv("DB_HOST")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
-
-from dotenv import load_dotenv
-from pathlib import Path
-
-# Load environment variables from .env file
-load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env')
-
-WATI_API_KEY = os.getenv('WATI_API_KEY')
-WATI_API_URL = os.getenv('WATI_API_URL', 'https://app.wati.io/api/v1')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-OPENAI_AGENT_ID = os.getenv('OPENAI_AGENT_ID')
-WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
 
 # Gmail Configuration
 GMAIL_SENDER_EMAIL = os.getenv("GMAIL_SENDER_EMAIL")

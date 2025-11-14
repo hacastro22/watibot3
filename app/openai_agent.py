@@ -24,6 +24,7 @@ from pytz import timezone
 from app import wati_client
 from app.clients import manychat_client
 from app import menu_reader
+from app import menu_prices_reader
 from app import operations_tool
 from app.message_humanizer import humanize_response
 
@@ -111,7 +112,212 @@ def load_system_instructions():
     with open('app/resources/system_instructions.txt', 'r', encoding='utf-8') as f:
         return f.read()
 
+def build_classification_system_prompt() -> str:
+    """Build minimal system prompt with base modules for classification"""
+    
+    with open('app/resources/system_instructions_new.txt', 'r', encoding='utf-8') as f:
+        modular_data = json.loads(f.read())
+    
+    base_modules = {
+        "MODULE_SYSTEM": modular_data.get("MODULE_SYSTEM", {}),
+        "DECISION_TREE": modular_data.get("DECISION_TREE", {}),
+        "MODULE_DEPENDENCIES": modular_data.get("MODULE_DEPENDENCIES", {}),
+        "CORE_CONFIG": modular_data.get("CORE_CONFIG", {})
+    }
+    
+    classification_prompt = f"""
+🚨🚨🚨 ABSOLUTE BLOCKING RULE - READ THIS FIRST 🚨🚨🚨
+
+BEFORE YOU DO ANYTHING ELSE, YOU MUST:
+1. Look at the user query
+2. Determine which modules it needs:
+   - MODULE_1_CRITICAL_WORKFLOWS (blocking protocols)
+   - MODULE_2A_PACKAGE_CONTENT (what's included), MODULE_2B_PRICE_INQUIRY (quotes/payment), MODULE_2C_AVAILABILITY (inventory), MODULE_2D_SPECIAL_SCENARIOS (membership/all-inclusive/events)
+   - MODULE_3_SERVICE_FLOWS (existing reservations)
+   - MODULE_4_INFORMATION (facilities/policies)
+3. IMMEDIATELY call load_additional_modules() tool with the required modules
+4. WAIT for the tool response with the module content
+5. ONLY THEN respond to the user using the loaded module information
+
+YOU ARE ABSOLUTELY FORBIDDEN TO:
+- Skip module loading
+- Go directly to price tools
+- Answer questions without loading required modules first
+- Assume modules are already loaded
+
+IF YOU DO NOT FOLLOW THIS RULE, YOU WILL CAUSE REVENUE LOSS AND CUSTOMER SERVICE FAILURES.
+
+{json.dumps(base_modules, ensure_ascii=False)}
+
+DYNAMIC MODULE LOADING INSTRUCTIONS:
+
+You have been loaded with the base system configuration above. Now you must:
+
+1. Analyze the user's query and conversation context
+2. Use the DECISION_TREE and MODULE_DEPENDENCIES to determine which additional modules you need:
+   - MODULE_1_CRITICAL_WORKFLOWS: For specialized blocking protocols (member handling, handover, occupancy enforcement, date validation, etc.)
+   - MODULE_2A_PACKAGE_CONTENT: For package details ("qué incluye")
+   - MODULE_2B_PRICE_INQUIRY: For pricing, quotes, payments (CONTAINS ROMÁNTICO +$20 RULE!)
+   - MODULE_2C_AVAILABILITY: For checking room availability and inventory
+   - MODULE_2D_SPECIAL_SCENARIOS: For membership, all-inclusive objections, special events (can micro-load)
+   - MODULE_3_SERVICE_FLOWS: For existing reservations, changes, cancellations  
+   - MODULE_4_INFORMATION: For facilities, schedules, general information
+
+3. 🚨 MANDATORY MODULE EVALUATION: For EVERY query, you MUST evaluate what modules you need
+4. 🚨 ALWAYS LOAD REQUIRED MODULES: Even if loaded before, load again if needed for current query
+5. For pricing/quotes: ALWAYS load MODULE_2B_PRICE_INQUIRY (contains pricing_logic with Romántico +$20 surcharge)
+6. For availability: ALWAYS load MODULE_2C_AVAILABILITY before pricing
+7. BLOCKED: You CANNOT respond until required modules are loaded for THIS SPECIFIC QUERY
+7. Use ONLY the loaded module instructions to respond
+
+RULE: Don't assume previous loads are sufficient. Each query = fresh module evaluation + loading.
+
+EXAMPLE: If user requests "cotización" you MUST:
+1. FIRST: load_additional_modules(["MODULE_2C_AVAILABILITY", "MODULE_2B_PRICE_INQUIRY"], "Need availability check then pricing for quote")
+2. THEN: Use the loaded pricing_logic rules (like Romántico +$20 surcharge)  
+3. FINALLY: Respond with accurate pricing
+
+This ensures optimal performance and relevant responses.
+"""
+    
+    return classification_prompt
+
+async def load_additional_modules(modules: List[str], reasoning: str, user_identifier: str = None, **kwargs) -> str:
+    """
+    Tool function that loads and returns requested module content.
+    
+    Supports:
+    1. Sub-modules: "MODULE_2A_PACKAGE_CONTENT", "MODULE_2B_PRICE_INQUIRY", "MODULE_2C_AVAILABILITY", "MODULE_2D_SPECIAL_SCENARIOS"
+    2. Micro-loading: "MODULE_2D_SPECIAL_SCENARIOS.membership_sales_protocol"
+    
+    Optimization: Skips modules loaded within the last 3 messages unless forced.
+    
+    Examples:
+        - load_additional_modules(["MODULE_2A_PACKAGE_CONTENT"], "Customer asks what's included")
+        - load_additional_modules(["MODULE_2D_SPECIAL_SCENARIOS.all_inclusive_inquiry_protocol"], "All-inclusive objection")
+        - load_additional_modules(["MODULE_2B_PRICE_INQUIRY", "MODULE_2C_AVAILABILITY"], "Price inquiry needs availability check")
+    """
+    from .thread_store import get_loaded_modules, save_loaded_modules, get_message_count
+    
+    # Check if modules were recently loaded (within last 3 messages)
+    modules_to_load = []
+    skipped_modules = []
+    current_message_num = get_message_count(user_identifier) if user_identifier else 0
+    
+    if user_identifier:
+        loaded_info = get_loaded_modules(user_identifier)
+        if loaded_info:
+            recently_loaded = loaded_info.get("modules", [])
+            load_message_num = loaded_info.get("message_num", 0)
+            
+            # Skip modules loaded within last 3 messages
+            if current_message_num - load_message_num <= 3:
+                for module in modules:
+                    if module in recently_loaded:
+                        skipped_modules.append(module)
+                        logger.info(f"[MODULE_OPTIMIZATION] Skipping {module} - loaded {current_message_num - load_message_num} message(s) ago")
+                    else:
+                        modules_to_load.append(module)
+            else:
+                modules_to_load = modules
+        else:
+            modules_to_load = modules
+    else:
+        modules_to_load = modules
+    
+    # If all modules were skipped, return early
+    if not modules_to_load:
+        loaded_content = "=== BASE MODULES ALREADY LOADED ===\n"
+        loaded_content += "MODULE_SYSTEM, DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG\n\n"
+        loaded_content += f"=== REQUESTED MODULES ALREADY LOADED ===\n"
+        loaded_content += f"Reasoning: {reasoning}\n"
+        loaded_content += f"Modules: {', '.join(skipped_modules)}\n"
+        loaded_content += f"These modules were loaded {current_message_num - loaded_info.get('message_num', 0)} message(s) ago and are still in context.\n"
+        logger.info(f"[MODULE_OPTIMIZATION] All requested modules already loaded - saved tokens")
+        return loaded_content
+    
+    with open('app/resources/system_instructions_new.txt', 'r', encoding='utf-8') as f:
+        all_modules = json.loads(f.read())
+    
+    # Always include base modules
+    loaded_content = "=== BASE MODULES ALREADY LOADED ===\n"
+    loaded_content += "MODULE_SYSTEM, DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG (includes universal safety protocols)\n\n"
+    
+    if skipped_modules:
+        loaded_content += f"=== RECENTLY LOADED MODULES (SKIPPED) ===\n"
+        loaded_content += f"{', '.join(skipped_modules)} - already loaded {current_message_num - loaded_info.get('message_num', 0)} message(s) ago\n\n"
+    
+    loaded_content += f"=== LOADING ADDITIONAL MODULES ===\nReasoning: {reasoning}\n\n"
+    
+    for module_ref in modules_to_load:
+        # Check if micro-loading (has dot notation)
+        if '.' in module_ref:
+            # Micro-load: MODULE_2D_SPECIAL_SCENARIOS.membership_sales_protocol
+            parts = module_ref.split('.')
+            module_name = parts[0]
+            protocol_path = parts[1:]
+            
+            if module_name not in all_modules:
+                logger.warning(f"[DYNAMIC_LOADING] Module not found: {module_name}")
+                continue
+            
+            # Navigate to the specific protocol
+            content = all_modules[module_name]
+            for key in protocol_path:
+                if isinstance(content, dict) and key in content:
+                    content = content[key]
+                else:
+                    logger.warning(f"[DYNAMIC_LOADING] Protocol path not found: {module_ref}")
+                    content = None
+                    break
+            
+            if content is not None:
+                loaded_content += f"=== {module_ref} (MICRO-LOAD) ===\n"
+                loaded_content += json.dumps({protocol_path[-1]: content}, ensure_ascii=False, indent=2) + "\n\n"
+                logger.info(f"[DYNAMIC_LOADING] Micro-loaded: {module_ref}")
+            
+        else:
+            # Full module or sub-module load
+            if module_ref in all_modules:
+                loaded_content += f"=== {module_ref} ===\n"
+                loaded_content += json.dumps(all_modules[module_ref], ensure_ascii=False, indent=2) + "\n\n"
+                logger.info(f"[DYNAMIC_LOADING] Loaded full module: {module_ref}")
+            else:
+                logger.warning(f"[DYNAMIC_LOADING] Module not found: {module_ref}")
+    
+    loaded_content += "\n=== INSTRUCTIONS ===\n"
+    loaded_content += "Use ALL loaded modules (base + additional) to provide a comprehensive response to the user.\n"
+    loaded_content += "Follow all protocols and guidelines from the loaded modules."
+    
+    # Save loaded modules for tracking
+    if user_identifier:
+        all_loaded = list(set(modules_to_load + skipped_modules))  # Combine and deduplicate
+        save_loaded_modules(user_identifier, all_loaded, current_message_num)
+        logger.info(f"[MODULE_OPTIMIZATION] Saved {len(all_loaded)} loaded modules at message {current_message_num}")
+    
+    return loaded_content
+
 tools = [
+    {
+        "type": "function",
+        "name": "load_additional_modules",
+        "description": "🚨 HIGHEST PRIORITY TOOL 🚨 Load additional instruction modules/sub-modules needed to respond to the user query. Supports: (1) Sub-modules: MODULE_2A_PACKAGE_CONTENT, MODULE_2B_PRICE_INQUIRY, MODULE_2C_AVAILABILITY, MODULE_2D_SPECIAL_SCENARIOS, (2) Micro-loading: MODULE_2D_SPECIAL_SCENARIOS.membership_sales_protocol. MUST BE CALLED FIRST for pricing/quotes/bookings/service requests.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "modules": {
+                    "type": "array", 
+                    "items": {"type": "string"},
+                    "description": "Array of additional module/sub-module/protocol names to load. Options: MODULE_1_CRITICAL_WORKFLOWS, MODULE_2A_PACKAGE_CONTENT, MODULE_2B_PRICE_INQUIRY, MODULE_2C_AVAILABILITY, MODULE_2D_SPECIAL_SCENARIOS (or micro-load with dot notation: MODULE_2D_SPECIAL_SCENARIOS.membership_sales_protocol), MODULE_3_SERVICE_FLOWS, MODULE_4_INFORMATION."
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Brief explanation of why these modules were selected based on the query analysis"
+                }
+            },
+            "required": ["modules", "reasoning"]
+        }
+    },
     {
         "type": "function",
         "name": "analyze_payment_proof",
@@ -167,8 +373,18 @@ tools = [
     },
     {
         "type": "function",
+        "name": "transfer_to_human_agent",
+        "description": "Transfer the conversation to a human agent. Use this when check_office_status indicates can_automate=false, or when a complex situation requires human intervention. This will change the conversation status to PENDING and assign it to the reservations team.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "function",
         "name": "get_price_for_date",
-        "description": "Get the price for a specific date for all available packages: Day Pass/Pasadía (pa_adulto, pa_nino), Accommodation/Las Hojas (lh_adulto, lh_nino), and Paquete Escapadita (es_adulto, es_nino). IMPORTANT: For daypass/pasadía questions use pa_ prices, for accommodation/overnight stays use lh_ prices. The assistant can also use this function on the reverse to check which dates have the prices the customer is interested in, this is useful when the customer has seen a promotion and is asking which dates contain that promotion price.",
+        "description": "🚨 REQUIRES MODULE_2B_PRICE_INQUIRY LOADED FIRST 🚨 Get the price for a specific date for all available packages: Day Pass/Pasadía (pa_adulto, pa_nino), Accommodation/Las Hojas (lh_adulto, lh_nino), and Paquete Escapadita (es_adulto, es_nino). CRITICAL: You MUST call load_additional_modules(['MODULE_2B_PRICE_INQUIRY']) BEFORE using this tool to get pricing rules like Romántico +$20 surcharge. IMPORTANT: For daypass/pasadía questions use pa_ prices, for accommodation/overnight stays use lh_ prices.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -198,13 +414,13 @@ tools = [
     {
         "type": "function",
         "name": "send_menu_pdf",
-        "description": "Sends the hotel's restaurant menu in PDF format to the user. Use this when the user asks for the menu or food options.",
+        "description": "Sends the hotel's restaurant menu in PDF format to the user. Use this when the user asks for the menu or food options. IMPORTANT: The caption you provide will be sent as the complete message to the user along with the PDF - do NOT generate an additional response after calling this tool.",
         "parameters": {
             "type": "object",
             "properties": {
                 "caption": {
                     "type": "string",
-                    "description": "A short, friendly message to send along with the menu PDF. For example: '¡Aquí tienes nuestro menú!'"
+                    "description": "A complete, friendly message to send along with the menu PDF. This will be the ONLY message the user receives, so make it complete and informative. For example: '¡Con mucho gusto! 🌴 Aquí le envío nuestro menú. Si desea recomendaciones o información sobre platillos premium, con gusto le ayudo. ☀️'"
                 }
             },
             "required": ["caption"]
@@ -213,7 +429,32 @@ tools = [
     {
         "type": "function",
         "name": "read_menu_content",
-        "description": "Converts the current menu PDF to high-resolution PNG images for visual analysis. Use this to answer specific questions about food items, prices, or menu sections by examining the actual menu layout and visual content. This provides accurate information about dish names, prices, and descriptions exactly as they appear in the menu without text extraction errors.",
+        "description": "Converts the current menu PDF to high-resolution PNG images for visual analysis. MANDATORY when customer requests comprehensive menu information like 'all seafood options', 'menu details', 'list all dishes', etc. Use this to visually examine the menu and provide COMPLETE lists of dishes in requested categories. After calling this tool, you MUST analyze the images carefully and list ALL items in the requested category, not just 1-2 examples. This provides accurate dish names, prices, and descriptions exactly as they appear visually in the menu.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "function",
+        "name": "send_menu_prices",
+        "description": "🚨 HIDDEN TOOL - NEVER PROACTIVE 🚨 Sends the menu with prices in PDF format to the user. ONLY use this when the customer EXPLICITLY asks about prices of dishes, beverages, or cocktails not included in their package (wanting to exceed package limits or buy more expensive items). IMPORTANT: The caption you provide will be sent as the complete message to the user along with the menu - do NOT generate an additional response after calling this tool. NEVER mention or offer this proactively.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "caption": {
+                    "type": "string",
+                    "description": "A complete, friendly message to send along with the menu prices. This will be the ONLY message the user receives, so make it complete and informative. For example: '¡Con mucho gusto! 🌴 Aquí le envío nuestro menú con precios para que pueda ver las opciones adicionales disponibles. ☀️'"
+                }
+            },
+            "required": ["caption"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "read_menu_prices_content",
+        "description": "🚨 HIDDEN TOOL - NEVER PROACTIVE 🚨 Converts the menu with prices PDF to high-resolution PNG images for visual analysis. ONLY use when customer asks about specific prices or costs of additional items (exceeding package limits or premium options). Use this to visually examine the menu prices and provide accurate pricing information. NEVER mention or offer this proactively.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -382,7 +623,7 @@ tools = [
                 },
                 "phone_number": {
                     "type": "string",
-                    "description": "Customer's phone number (will be extracted from waId)"
+                    "description": "Customer's phone number. For WhatsApp (WATI) users, use 'AUTO' and it will be extracted from waId. For Facebook/Instagram users, this MUST be explicitly asked from the customer and provided here (cannot be inferred)."
                 },
                 "city": {
                     "type": "string",
@@ -467,7 +708,7 @@ tools = [
     {
         "type": "function",
         "name": "send_email",
-        "description": "Sends an email to internal hotel staff based on specific use cases. CRITICAL: This tool is ONLY for internal notifications and MUST NOT be used to email customers. The to_emails parameter is strictly validated. Use cases: 1. For membership inquiries, email promociones@lashojasresort.com. 2. For group quotes (20+ people), email sbartenfeld@lashojasresort.com and acienfuegos@lashojasresort.com. 3. For last-minute customer information for reception, email reservas@lashojasresort.com.",
+        "description": "Sends an email to internal hotel staff based on specific use cases. CRITICAL: This tool is ONLY for internal notifications and MUST NOT be used to email customers. The to_emails parameter is strictly validated. Use cases: 1. For membership inquiries, email promociones@lashojasresort.com. 2. For group quotes (30+ people), email sbartenfeld@lashojasresort.com and acienfuegos@lashojasresort.com. 3. For last-minute customer information for reception, email reservas@lashojasresort.com. 4. For job inquiries/employment opportunities, email lnajera@lashojasresort.com and recursoshumanos@lashojasresort.com.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -480,7 +721,7 @@ tools = [
                 },
                 "subject": {
                     "type": "string",
-                    "description": "The subject of the email, clearly stating the purpose (e.g., 'Membership Inquiry', 'Group Quote Request')."
+                    "description": "The subject of the email, clearly stating the purpose (e.g., 'Membership Inquiry', 'Group Quote Request', 'Job Inquiry')."
                 },
                 "body": {
                     "type": "string",
@@ -788,7 +1029,7 @@ async def send_bungalow_pictures(
     - Else if `phone_number` is provided, send via WATI (WhatsApp).
     - Else return an error indicating missing identifiers.
     """
-    base_path = "/home/robin/watibot3/app/resources/pictures"
+    base_path = "/home/robin/watibot4/app/resources/pictures"
     type_map = {
         "Bungalow Familiar": "bungalow_familiar",
         "Bungalow Junior": "bungalow_junior",
@@ -856,7 +1097,7 @@ async def send_public_areas_pictures(
 
     See `send_bungalow_pictures` for routing logic.
     """
-    base_path = "/home/robin/watibot3/app/resources/pictures"
+    base_path = "/home/robin/watibot4/app/resources/pictures"
     picture_dir = os.path.join(base_path, "public_areas")
 
     if not os.path.isdir(picture_dir):
@@ -909,13 +1150,15 @@ async def send_menu_pdf_wrapper(
     phone_number: Optional[str] = None,
     subscriber_id: Optional[str] = None,
     channel: Optional[str] = None,
-) -> dict:
+) -> str:
     """Send the restaurant menu PDF via ManyChat (FB/IG) or WhatsApp.
 
     - Uses ManyChat when `subscriber_id` and `channel` provided.
     - Falls back to WATI (WhatsApp) when `phone_number` provided.
+    
+    Returns a confirmation message that serves as the final response to the user.
     """
-    menu_pdf_path = "/home/robin/watibot3/app/resources/menu.pdf"
+    menu_pdf_path = "/home/robin/watibot4/app/resources/menu.pdf"
     if subscriber_id and channel in ("facebook", "instagram"):
         # Instagram: convert PDF to images and send as images (IG doesn't support PDF attachments)
         if channel == "instagram":
@@ -945,7 +1188,8 @@ async def send_menu_pdf_wrapper(
                         channel=channel,
                         caption=cap,
                     )
-                return {"status": "sent", "channel": channel, "pages": len(image_paths)}
+                # Return empty string since caption already contains the complete message
+                return ""
             except Exception as e:
                 logger.warning(
                     f"[IG] PDF->image conversion unavailable or failed ({e}). Sending link as text."
@@ -958,7 +1202,8 @@ async def send_menu_pdf_wrapper(
                     channel=channel,
                     caption=caption,
                 )
-                return {"status": "sent_as_link", "channel": channel}
+                # Return empty string since caption already contains the complete message
+                return ""
 
         # Facebook: send PDF as file attachment
         await manychat_client.send_media_message(
@@ -968,22 +1213,121 @@ async def send_menu_pdf_wrapper(
             channel=channel,
             caption=caption,
         )
-        return {"status": "sent", "channel": channel}
+        # Return empty string since caption already contains the complete message
+        return ""
     elif phone_number:
-        return await wati_client.send_wati_file(
+        result = await wati_client.send_wati_file(
             phone_number=phone_number, caption=caption, file_path=menu_pdf_path
         )
+        # Return empty string since caption already contains the complete message
+        return ""
     else:
         logger.error("No subscriber_id/channel or phone_number provided to send menu PDF.")
-        return {"error": "Missing recipient identifiers"}
+        return "Lo siento, no pude identificar tu canal para enviar el menú. Por favor intenta de nuevo."
+
+async def send_menu_prices_wrapper(
+    caption: str,
+    phone_number: Optional[str] = None,
+    subscriber_id: Optional[str] = None,
+    channel: Optional[str] = None,
+) -> str:
+    """Send the restaurant menu with prices via ManyChat (FB/IG) or WhatsApp.
+
+    - Uses ManyChat when `subscriber_id` and `channel` provided.
+    - Falls back to WATI (WhatsApp) when `phone_number` provided.
+    - For Instagram: converts PDF to images (IG doesn't support PDF attachments)
+    
+    Returns a confirmation message that serves as the final response to the user.
+    """
+    menu_prices_pdf_path = "/home/robin/watibot4/app/resources/menu_prices.pdf"
+    if subscriber_id and channel in ("facebook", "instagram"):
+        # Instagram: convert PDF to images and send as images (IG doesn't support PDF attachments)
+        if channel == "instagram":
+            try:
+                import fitz  # PyMuPDF
+                from pathlib import Path
+                import time as _time
+                out_dir = Path(__file__).resolve().parent / "resources" / "pictures" / "menu_prices_converted"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                ts = int(_time.time())
+                doc = fitz.open(menu_prices_pdf_path)
+                image_paths = []
+                for i, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=144)
+                    img_path = out_dir / f"menu_prices_{ts}_p{i+1}.png"
+                    pix.save(str(img_path))
+                    image_paths.append(str(img_path))
+                doc.close()
+
+                # Send images sequentially; include caption on first image only
+                for idx, img_path in enumerate(image_paths):
+                    cap = caption if idx == 0 else ""
+                    await manychat_client.send_media_message(
+                        subscriber_id=subscriber_id,
+                        file_path=img_path,
+                        media_type="image",
+                        channel=channel,
+                        caption=cap,
+                    )
+                # Return empty string since caption already contains the complete message
+                return ""
+            except Exception as e:
+                logger.warning(
+                    f"[IG] PDF->image conversion unavailable or failed ({e}). Sending link as text."
+                )
+                # Fallback: send caption then link as text message
+                await manychat_client.send_media_message(
+                    subscriber_id=subscriber_id,
+                    file_path=menu_prices_pdf_path,
+                    media_type="file",
+                    channel=channel,
+                    caption=caption,
+                )
+                # Return empty string since caption already contains the complete message
+                return ""
+
+        # Facebook: send PDF as file attachment
+        await manychat_client.send_media_message(
+            subscriber_id=subscriber_id,
+            file_path=menu_prices_pdf_path,
+            media_type="file",
+            channel=channel,
+            caption=caption,
+        )
+        # Return empty string since caption already contains the complete message
+        return ""
+    elif phone_number:
+        result = await wati_client.send_wati_file(
+            phone_number=phone_number, caption=caption, file_path=menu_prices_pdf_path
+        )
+        # Return empty string since caption already contains the complete message
+        return ""
+    else:
+        logger.error("No subscriber_id/channel or phone_number provided to send menu prices.")
+        return "Lo siento, no pude identificar tu canal para enviar el menú de precios. Por favor intenta de nuevo."
+
+async def transfer_to_human_agent_wrapper(phone_number: str = None, subscriber_id: str = None, channel: str = None) -> str:
+    """Transfer conversation to human agent by triggering the handover process."""
+    if phone_number:
+        # WATI platform
+        await wati_client.handle_handover(phone_number)
+        logger.info(f"[TRANSFER] Successfully transferred {phone_number} to human agent")
+        return "transfer_completed"
+    else:
+        # ManyChat platform - not yet implemented
+        logger.warning(f"[TRANSFER] ManyChat handover not implemented for subscriber {subscriber_id}")
+        return "transfer_not_supported_for_platform"
 
 available_functions = {
     "get_price_for_date": database_client.get_price_for_date,
     "send_location_pin": format_location_as_text,
     "send_menu_pdf": send_menu_pdf_wrapper,
     "read_menu_content": menu_reader.read_menu_content_wrapper,
+    "send_menu_prices": send_menu_prices_wrapper,
+    "read_menu_prices_content": menu_prices_reader.read_menu_prices_content_wrapper,
     "analyze_payment_proof": payment_proof_analyzer.analyze_payment_proof,
     "check_office_status": office_status_tool.check_office_status,
+    "transfer_to_human_agent": transfer_to_human_agent_wrapper,
     "check_room_availability": database_client.check_room_availability,
     "check_smart_availability": smart_availability.check_smart_availability,
     "send_bungalow_pictures": send_bungalow_pictures,
@@ -1001,6 +1345,7 @@ available_functions = {
     "make_booking": booking_tool.make_booking,
     "send_email": email_service.send_email,
     "notify_operations_department": operations_tool.notify_operations_department,
+    "load_additional_modules": load_additional_modules,
 }
 
 async def rotate_conversation_thread(old_conversation_id: str, wa_id: str, current_message: str, system_instructions: str) -> str:
@@ -1008,6 +1353,8 @@ async def rotate_conversation_thread(old_conversation_id: str, wa_id: str, curre
     Creates a new conversation thread when the current one exceeds context window.
     Seeds the new thread with essential context from the old one.
     """
+    from .thread_store import reset_message_count, clear_loaded_modules
+    
     try:
         logger.info(f"[THREAD_ROTATION] Starting rotation for wa_id: {wa_id}")
         
@@ -1028,6 +1375,11 @@ async def rotate_conversation_thread(old_conversation_id: str, wa_id: str, curre
             if not new_conversation_id:
                 raise RuntimeError("Conversations API returned no id")
         logger.info(f"[THREAD_ROTATION] Created new conversation: {new_conversation_id}")
+        
+        # Reset message count and clear loaded modules for fresh start
+        reset_message_count(wa_id)
+        clear_loaded_modules(wa_id)
+        logger.info(f"[MODULE_OPTIMIZATION] Reset message count and cleared loaded modules for {wa_id}")
         
         # NOTE: Context seeding now handled in get_openai_response via enhanced_developer_message
         # No separate seeding call needed - prevents context overflow issues
@@ -1118,14 +1470,31 @@ async def get_openai_response(
     
     Uses conversation IDs instead of thread IDs for conversation context management.
     """
-    from .thread_store import get_conversation_id, save_conversation_id, get_last_response_id, save_response_id
+    from .thread_store import (
+        get_conversation_id, save_conversation_id, get_last_response_id, save_response_id,
+        increment_message_count, get_message_count
+    )
     
     el_salvador_tz = timezone("America/El_Salvador")
     now_in_sv = datetime.now(el_salvador_tz)
     datetime_str = now_in_sv.strftime("%A, %Y-%m-%d, %H:%M")
     
-    # Load system instructions from file
-    system_instructions = load_system_instructions()
+    # Get or increment message count for this conversation
+    user_identifier = phone_number or subscriber_id or "unknown"
+    current_message_count = increment_message_count(user_identifier)
+    
+    # Load dynamic system instructions with base modules
+    system_instructions = build_classification_system_prompt()
+    
+    # Log token optimization
+    try:
+        with open('app/resources/system_instructions.txt', 'r', encoding='utf-8') as f:
+            original_size = len(f.read())
+        base_size = len(system_instructions)
+        initial_reduction = ((original_size - base_size) / original_size) * 100
+        logger.info(f"[DYNAMIC_LOADING] Base modules loaded: {base_size} chars, Initial reduction: {initial_reduction:.1f}%")
+    except Exception as e:
+        logger.info(f"[DYNAMIC_LOADING] Using dynamic loading with base size: {len(system_instructions)} chars")
     
     # Build the contextualized user message (same as before)
     contextualized_message = (
@@ -1161,6 +1530,7 @@ async def get_openai_response(
         f"- For Bank Transfers, call `sync_bank_transfers()`. "
         f"- **VALIDATION STEP**: "
         f"- **CompraClick**: After syncing, use `validate_compraclick_payment` with the correct `authorization_number` and `booking_total`. "
+        f"  * 🚨 CRITICAL: When analyze_payment_proof returns 'receipt_type: compraclick', the 'transaction_id' field in 'extracted_info' IS the authorization code. Use extracted_info.transaction_id directly as authorization_number. DO NOT ask customer for authorization code if already extracted. "
         f"  * If validation fails with 'Authorization code not found' after 3 attempts or customer can't find code, use `validate_compraclick_payment_fallback` instead. "
         f"- **Bank Transfer**: CRITICAL - Before calling `validate_bank_transfer`, verify that ALL required data was extracted from the payment proof: "
         f"  * If the `timestamp` field is missing or empty from `analyze_payment_proof` result, you MUST ask the customer to provide the exact date of the bank transfer (e.g., 'Por favor, indícame la fecha exacta de la transferencia bancaria (formato DD/MM/AAAA)'). "
@@ -1177,11 +1547,11 @@ async def get_openai_response(
         f"- **BEFORE ANY BOOKING ATTEMPT**: You MUST call `check_office_status()` to determine if automation is allowed. This is MANDATORY - no exceptions. "
         f"- **If office_status = 'closed' OR can_automate = true**: Proceed with automated booking using `make_booking`. "
         f"- **If office_status = 'open' AND can_automate = false**: "
-        f"  1. Send a complete customer message that: "
+        f"  1. IMMEDIATELY call `transfer_to_human_agent` to transfer the conversation to the reservations team. "
+        f"  2. After calling transfer_to_human_agent, send a complete customer message that: "
         f"     - Confirms payment validation success "
         f"     - Explains that since offices are open, they'll be transferred to a human agent to complete booking "
-        f"     - Provides reassurance about the process "
-        f"  2. After sending the customer message, send a separate follow-up message containing ONLY the word 'handover' (no other text) to trigger the system handover process. "
+        f"     - Provides booking summary and reassurance "
         f"  3. DO NOT attempt booking. "
         f"6. **Booking Confirmation**: "
         f"- **CRITICAL**: After confirming automation is allowed via `check_office_status`, immediately call the `make_booking` function to reserve the room. DO NOT ask for the information again; use the data you have already collected. "
@@ -1210,11 +1580,18 @@ async def get_openai_response(
             # Continue with normal processing if PENDING check fails
 
     # Get or create conversation ID using Responses API
-    user_identifier = phone_number or subscriber_id or "unknown"
-    conversation_id = thread_id or get_conversation_id(user_identifier)
-    if thread_id:
-        # ensure persistence if you want this to become canonical for the user
+    # NOTE: user_identifier already set above when incrementing message count
+    
+    # CRITICAL FIX: Only use thread_id if it's a valid conversation ID (starts with 'conv_')
+    # Old data may have phone numbers stored as thread_id, which causes 400 errors
+    if thread_id and thread_id.startswith('conv_'):
+        conversation_id = thread_id
         save_conversation_id(user_identifier, thread_id)
+    else:
+        # Either no thread_id, or it's invalid (phone number) - get from database
+        conversation_id = get_conversation_id(user_identifier)
+        if thread_id and not thread_id.startswith('conv_'):
+            logger.warning(f"[OpenAI] Invalid thread_id format: {thread_id}. Will create new conversation.")
     
     # Function to get conversation context for recovery
     async def get_conversation_context(conv_id):
@@ -1316,14 +1693,22 @@ async def get_openai_response(
             from agent_context_injector import (
                 check_if_agent_context_injected, 
                 mark_agent_context_injected, 
-                get_agent_context_for_system_injection
+                get_agent_context_for_system_injection,
+                get_manychat_context_for_system_injection
             )
             
             needs_agent_context = not check_if_agent_context_injected(conversation_id)
             agent_context_system_msg = ""
             
             if needs_agent_context:
-                agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                # Get context based on user type (same logic as thread rotation)
+                if phone_number and phone_number.isdigit():
+                    # WATI user: use WATI API to fetch message history
+                    agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                else:
+                    # ManyChat user (Facebook/Instagram): use local thread_store to fetch message history
+                    agent_context_system_msg = get_manychat_context_for_system_injection(user_identifier)
+                
                 if agent_context_system_msg:
                     logger.info(f"[AGENT_CONTEXT] Injecting agent context for conversation {conversation_id}")
                     
@@ -1352,56 +1737,65 @@ async def get_openai_response(
             else:
                 logger.info(f"[AGENT_CONTEXT] Agent context already injected for conversation {conversation_id}")
             
-            # Check for missed customer-agent messages (only if NOT first message)
-            missed_messages = ""
-            if not needs_agent_context:  # Only if agent context already injected (not first message)
-                from agent_context_injector import (
-                    check_if_5_minutes_since_last_webhook_message,
-                    get_missed_customer_agent_messages_for_developer_input
-                )
-                
-                if check_if_5_minutes_since_last_webhook_message(phone_number):
-                    missed_messages = get_missed_customer_agent_messages_for_developer_input(phone_number)
-                    if missed_messages:
-                        logger.info(f"[MISSED_MESSAGES] Found missed customer-agent messages for {phone_number}")
-                    else:
-                        logger.info(f"[MISSED_MESSAGES] No missed messages found for {phone_number}")
-                else:
-                    logger.info(f"[MISSED_MESSAGES] Less than 5 minutes since last webhook message for {phone_number}")
+            # REMOVED: Duplicate missed messages check - now handled in main.py timer_callback
+            # The missed messages are already prepended to the user_message before this function is called
+            # This prevents the race condition where the timestamp is updated before the check
             
-            # Use regular developer message + missed messages if any
-            enhanced_developer_message = contextualized_message + missed_messages
+            # Use regular developer message (missed messages already in user_message if applicable)
+            enhanced_developer_message = contextualized_message
             
             # SECOND API CALL: Send normal message (system + developer + user)
             # Always use previous_response_id to avoid stale tool call conflicts
+            
+            # Determine if we should send system_instructions (base_modules)
+            # Send on: conversation start, after context injection, or every 3 messages
+            should_send_base_modules = (
+                not previous_response_id or  # New conversation
+                needs_agent_context or  # Just injected agent context
+                current_message_count % 3 == 0  # Every 3 messages
+            )
+            
+            if should_send_base_modules:
+                logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv={not previous_response_id}, after_context={needs_agent_context}, periodic={current_message_count % 3 == 0})")
+            else:
+                logger.info(f"[MODULE_OPTIMIZATION] Skipping base_modules at message {current_message_count} - using cached from previous_response_id")
+            
             if previous_response_id:
                 # Continue from existing response
+                input_messages = []
+                
+                # Conditionally add system instructions
+                if should_send_base_modules:
+                    input_messages.append({
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system_instructions}]
+                    })
+                
+                input_messages.extend([
+                    {
+                        "type": "message", 
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": enhanced_developer_message}]
+                    },
+                    {
+                        "type": "message",
+                        "role": "user", 
+                        "content": [{"type": "input_text", "text": message}]
+                    }
+                ])
+                
                 response = await openai_client.responses.create(
                     model="gpt-5",
                     previous_response_id=previous_response_id,
-                    input=[
-                        {
-                            "type": "message",
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": system_instructions}]
-                        },
-                        {
-                            "type": "message", 
-                            "role": "developer",
-                            "content": [{"type": "input_text", "text": enhanced_developer_message}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "user", 
-                            "content": [{"type": "input_text", "text": message}]
-                        }
-                    ],
+                    input=input_messages,
                     tools=tools,
                     max_output_tokens=4000
                 )
                 logger.info(f"[OpenAI] Continued from response {previous_response_id}")
             else:
                 # New conversation - use conversation parameter only for the very first call
+                # Always send system_instructions on first call
                 response = await openai_client.responses.create(
                     model="gpt-5",
                     conversation=conversation_id,
@@ -1453,10 +1847,27 @@ async def get_openai_response(
                         raise RuntimeError("Conversations API returned no id")
                 
                 save_conversation_id(user_identifier, conversation_id)
-                logger.info(f"[OpenAI] Created fresh conversation {conversation_id}")
                 
-                # INJECT AGENT CONTEXT first for fresh conversation
-                agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                # Reset message count and clear loaded modules for fresh start
+                from .thread_store import reset_message_count, clear_loaded_modules
+                from agent_context_injector import (
+                    get_agent_context_for_system_injection,
+                    get_manychat_context_for_system_injection
+                )
+                reset_message_count(user_identifier)
+                clear_loaded_modules(user_identifier)
+                # Increment to get message 1 for fresh conversation
+                current_message_count = increment_message_count(user_identifier)
+                logger.info(f"[OpenAI] Created fresh conversation {conversation_id} with reset counters (now at message {current_message_count})")
+                
+                # INJECT AGENT CONTEXT first for fresh conversation (channel-aware)
+                if phone_number and phone_number.isdigit():
+                    # WATI user: use WATI API to fetch message history
+                    agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                else:
+                    # ManyChat user (Facebook/Instagram): use local thread_store to fetch message history
+                    agent_context_system_msg = get_manychat_context_for_system_injection(user_identifier)
+                
                 if agent_context_system_msg:
                     logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh conversation {conversation_id}")
                     agent_response = await openai_client.responses.create(
@@ -1474,10 +1885,54 @@ async def get_openai_response(
                     # Save agent context response ID
                     save_response_id(user_identifier, agent_response.id)
                     
+                    # Determine if we should send base_modules (always True for fresh conversation)
+                    should_send_base_modules = (
+                        True  # Fresh conversation after recovery - always send base modules
+                    )
+                    
+                    logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=True, periodic=False)")
+                    
                     # RESTART THE ENTIRE FLOW with fresh conversation
+                    input_messages = [
+                        {
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": system_instructions}]
+                        },
+                        {
+                            "type": "message",
+                            "role": "developer", 
+                            "content": [{"type": "input_text", "text": contextualized_message}]
+                        },
+                        {
+                            "type": "message",
+                            "role": "user", 
+                            "content": [{"type": "input_text", "text": message}]
+                        }
+                    ]
+                    
                     response = await openai_client.responses.create(
                         model="gpt-5",
                         previous_response_id=agent_response.id,
+                        input=input_messages,
+                        tools=tools,
+                        max_output_tokens=4000
+                    )
+                    
+                    # Save main response ID
+                    save_response_id(user_identifier, response.id)
+                    logger.info(f"[OpenAI] Successfully restarted with fresh conversation")
+                else:
+                    # No agent context available - make API call directly with fresh conversation
+                    logger.info(f"[AGENT_CONTEXT] No agent context available for fresh conversation {conversation_id}")
+                    
+                    # Determine if we should send base_modules (always True for fresh conversation)
+                    should_send_base_modules = True
+                    logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
+                    
+                    response = await openai_client.responses.create(
+                        model="gpt-5",
+                        conversation=conversation_id,
                         input=[
                             {
                                 "type": "message",
@@ -1499,9 +1954,9 @@ async def get_openai_response(
                         max_output_tokens=4000
                     )
                     
-                    # Save main response ID
+                    # Save response ID
                     save_response_id(user_identifier, response.id)
-                    logger.info(f"[OpenAI] Successfully restarted with fresh conversation")
+                    logger.info(f"[OpenAI] Successfully started fresh conversation without context")
             else:
                 # Re-raise if not a tool call error
                 raise
@@ -1541,14 +1996,52 @@ async def get_openai_response(
                         if asyncio.iscoroutinefunction(fn):
                             # Auto-inject channel identifiers if the function accepts them
                             sig = inspect.signature(fn)
-                            if 'phone_number' in sig.parameters and phone_number:
-                                fn_args.setdefault('phone_number', phone_number)
-                            if 'wa_id' in sig.parameters and phone_number:
-                                fn_args.setdefault('wa_id', phone_number)
+                            
+                            # CRITICAL: Always override wa_id with the actual identifier
+                            if 'wa_id' in sig.parameters:
+                                # For WATI users, wa_id is the phone_number
+                                # For ManyChat users, wa_id should be the subscriber_id
+                                if phone_number and phone_number.isdigit():
+                                    fn_args['wa_id'] = phone_number
+                                elif subscriber_id:
+                                    fn_args['wa_id'] = subscriber_id
+                            
+                            # CRITICAL: Handle phone_number parameter based on channel and function type
+                            if 'phone_number' in sig.parameters:
+                                current_phone = fn_args.get('phone_number', '')
+                                # Override if assistant sent placeholder values or empty
+                                if current_phone in ['', 'AUTO', 'from_wa_id', 'from_waid']:
+                                    if phone_number and phone_number.isdigit():
+                                        # Check if this function needs the actual phone_number (not extracted from wa_id)
+                                        # These functions send media or perform WATI API operations requiring phone_number
+                                        functions_needing_phone = [
+                                            'send_bungalow_pictures', 
+                                            'send_public_areas_pictures', 
+                                            'send_menu_pdf',  # Tool name, not function name
+                                            'send_menu_prices',  # Tool name, not function name
+                                            'transfer_to_human_agent'
+                                        ]
+                                        
+                                        if fn_name in functions_needing_phone:
+                                            # Media functions need the actual phone_number to send files
+                                            logger.info(f"[PHONE_FIX] WATI user - Injecting phone_number for {fn_name}: {phone_number}")
+                                            fn_args['phone_number'] = phone_number
+                                        else:
+                                            # WATI user: keep empty so booking_tool extracts local number from wa_id
+                                            # The _extract_phone_from_wa_id function handles country code removal properly
+                                            logger.info(f"[PHONE_FIX] WATI user - phone_number was '{current_phone}', keeping empty so booking_tool extracts from wa_id: {phone_number}")
+                                            fn_args['phone_number'] = ''
+                                    else:
+                                        # ManyChat user: phone must be asked from customer, keep empty
+                                        logger.warning(f"[PHONE_FIX] ManyChat user - phone_number was '{current_phone}' but cannot auto-fill. Function will receive empty string.")
+                                        fn_args['phone_number'] = ''
+                            
                             if 'subscriber_id' in sig.parameters and subscriber_id:
                                 fn_args.setdefault('subscriber_id', subscriber_id)
                             if 'channel' in sig.parameters and channel:
                                 fn_args.setdefault('channel', channel)
+                            if 'user_identifier' in sig.parameters and user_identifier:
+                                fn_args.setdefault('user_identifier', user_identifier)
                             result = await fn(**fn_args)
                         else:
                             result = fn(**fn_args)
@@ -1631,10 +2124,26 @@ async def get_openai_response(
                             raise RuntimeError("Conversations API returned no id")
                     
                     save_conversation_id(user_identifier, conversation_id)
-                    logger.info(f"[Tool] Created fresh conversation {conversation_id} for recovery")
                     
-                    # INJECT AGENT CONTEXT first for fresh conversation
-                    agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                    # Reset message count and clear loaded modules for fresh start
+                    from .thread_store import reset_message_count, clear_loaded_modules
+                    from agent_context_injector import (
+                        get_agent_context_for_system_injection,
+                        get_manychat_context_for_system_injection
+                    )
+                    reset_message_count(user_identifier)
+                    clear_loaded_modules(user_identifier)
+                    # Increment to get message 1 for fresh conversation
+                    current_message_count = increment_message_count(user_identifier)
+                    logger.info(f"[Tool] Created fresh conversation {conversation_id} for recovery with reset counters (now at message {current_message_count})")
+                    
+                    # INJECT AGENT CONTEXT first for fresh conversation (channel-aware)
+                    if phone_number and phone_number.isdigit():
+                        # WATI user: use WATI API to fetch message history
+                        agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                    else:
+                        # ManyChat user (Facebook/Instagram): use local thread_store to fetch message history
+                        agent_context_system_msg = get_manychat_context_for_system_injection(user_identifier)
                     if agent_context_system_msg:
                         logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh recovery conversation {conversation_id}")
                         # Fresh conversation recovery - use conversation parameter for first call
@@ -1650,32 +2159,62 @@ async def get_openai_response(
                         )
                         save_response_id(user_identifier, agent_response.id)
                         logger.info(f"[AGENT_CONTEXT] Agent context injected for fresh recovery conversation {conversation_id}")
-                    
-                    # RESTART THE ENTIRE FLOW with fresh conversation
-                    # Fresh conversation recovery - use conversation parameter for first call
-                    response = await openai_client.responses.create(
-                        model="gpt-5",
-                        conversation=conversation_id,
-                        input=[
-                            {
-                                "type": "message",
-                                "role": "system",
-                                "content": [{"type": "input_text", "text": system_instructions}]
-                            },
-                            {
-                                "type": "message",
-                                "role": "developer", 
-                                "content": [{"type": "input_text", "text": contextualized_message}]
-                            },
-                            {
-                                "type": "message",
-                                "role": "user", 
-                                "content": [{"type": "input_text", "text": message}]
-                            }
-                        ],
-                        tools=tools,
-                        max_output_tokens=4000
-                    )
+                        
+                        # Log base_modules sending
+                        logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=True, periodic=False)")
+                        
+                        # RESTART THE ENTIRE FLOW with fresh conversation - use previous_response_id after context
+                        response = await openai_client.responses.create(
+                            model="gpt-5",
+                            previous_response_id=agent_response.id,
+                            input=[
+                                {
+                                    "type": "message",
+                                    "role": "system",
+                                    "content": [{"type": "input_text", "text": system_instructions}]
+                                },
+                                {
+                                    "type": "message",
+                                    "role": "developer", 
+                                    "content": [{"type": "input_text", "text": contextualized_message}]
+                                },
+                                {
+                                    "type": "message",
+                                    "role": "user", 
+                                    "content": [{"type": "input_text", "text": message}]
+                                }
+                            ],
+                            tools=tools,
+                            max_output_tokens=4000
+                        )
+                    else:
+                        # No agent context - send directly with conversation ID
+                        logger.info(f"[AGENT_CONTEXT] No agent context available for fresh recovery conversation {conversation_id}")
+                        logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
+                        
+                        response = await openai_client.responses.create(
+                            model="gpt-5",
+                            conversation=conversation_id,
+                            input=[
+                                {
+                                    "type": "message",
+                                    "role": "system",
+                                    "content": [{"type": "input_text", "text": system_instructions}]
+                                },
+                                {
+                                    "type": "message",
+                                    "role": "developer", 
+                                    "content": [{"type": "input_text", "text": contextualized_message}]
+                                },
+                                {
+                                    "type": "message",
+                                    "role": "user", 
+                                    "content": [{"type": "input_text", "text": message}]
+                                }
+                            ],
+                            tools=tools,
+                            max_output_tokens=4000
+                        )
                     # Save recovery response ID
                     save_response_id(user_identifier, response.id)
                     logger.info(f"[Tool] Successfully restarted with fresh conversation - resetting tool rounds")
@@ -1692,7 +2231,16 @@ async def get_openai_response(
         # After all tool rounds complete, check response quality
 
         # After all tool rounds complete, check response quality
-        final_response = response.output_text or _extract_text_from_output(getattr(response, "output", [])) or ""
+        final_response = _extract_text_from_output(getattr(response, "output", [])) or ""
+        
+        # Check if send_menu_pdf or send_menu_prices was called - if so, suppress duplicate final response
+        # The caption parameter already contains the complete message to the user
+        menu_pdf_called = any(fn_name == "send_menu_pdf" for fn_name, _ in all_tool_outputs)
+        menu_prices_called = any(fn_name == "send_menu_prices" for fn_name, _ in all_tool_outputs)
+        if menu_pdf_called or menu_prices_called:
+            tool_name = "send_menu_pdf" if menu_pdf_called else "send_menu_prices"
+            logger.info(f"[MENU_PDF] {tool_name} was called with caption - suppressing duplicate final response")
+            return "", conversation_id  # Return empty string to prevent duplicate message
         
         # ONLY do synthesis call if response seems incomplete or error-like
         # Skip synthesis for friendly_goodbye responses
@@ -1725,7 +2273,7 @@ async def get_openai_response(
             # Save synthesis response ID
             save_response_id(user_identifier, response.id)
             
-            final_response = response.output_text or _extract_text_from_output(getattr(response, "output", [])) or "No response generated."
+            final_response = _extract_text_from_output(getattr(response, "output", [])) or "No response generated."
         
         # Apply JSON guard (preserve from memory) - only if still seems problematic
         if final_response and len(final_response) < 200:
@@ -1752,7 +2300,7 @@ async def get_openai_response(
                     )
                     # Save repair response ID
                     save_response_id(user_identifier, repair_response.id)
-                    final_response = repair_response.output_text or final_response
+                    final_response = _extract_text_from_output(getattr(repair_response, "output", [])) or final_response
             except:
                 pass  # Not JSON, use as-is
         
@@ -1795,7 +2343,7 @@ async def get_openai_response(
                 )
                 # Save rate limit retry response ID
                 save_response_id(user_identifier, response.id)
-                final_response = response.output_text or "No response after retry."
+                final_response = _extract_text_from_output(getattr(response, "output", [])) or "No response after retry."
                 
                 # HUMANIZATION STEP for retry response
                 try:
@@ -1812,17 +2360,29 @@ async def get_openai_response(
             # Handle context window overflow by rotating to new conversation
             logger.warning(f"[THREAD_ROTATION] Context window exceeded, rotating to new conversation thread")
             try:
-                new_conversation_id = await rotate_conversation_thread(conversation_id, phone_number, contextualized_message, system_instructions)
+                new_conversation_id = await rotate_conversation_thread(conversation_id, user_identifier, contextualized_message, system_instructions)
                 if new_conversation_id:
+                    # CRITICAL: Clear old response ID to prevent using old conversation's response
+                    save_response_id(user_identifier, None)
+                    logger.info(f"[THREAD_ROTATION] Cleared old response ID for fresh start")
+                    # Note: Message count and loaded modules already reset in rotate_conversation_thread
+                    
                     # Force agent context injection for new conversation
                     logger.info(f"[THREAD_ROTATION] Injecting agent context for new conversation {new_conversation_id}")
                     
                     from agent_context_injector import (
                         get_agent_context_for_system_injection,
+                        get_manychat_context_for_system_injection,
                         mark_agent_context_injected
                     )
                     
-                    agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                    # Get context based on user type
+                    if phone_number:
+                        # WATI user: use WATI API to fetch message history
+                        agent_context_system_msg = get_agent_context_for_system_injection(phone_number)
+                    else:
+                        # ManyChat user: use local thread_store to fetch message history
+                        agent_context_system_msg = get_manychat_context_for_system_injection(user_identifier)
                     if agent_context_system_msg:
                         # FIRST API CALL: Send agent context only  
                         # Fresh conversation - use conversation parameter for first call
@@ -1848,7 +2408,8 @@ async def get_openai_response(
                     
                     # Recursively call get_openai_response with new conversation ID
                     # This ensures proper tool execution flow after thread rotation
-                    logger.info(f"[THREAD_ROTATION] Retrying with new conversation {new_conversation_id} through complete flow")
+                    # Note: The recursive call will increment message count to 1 and send base_modules
+                    logger.info(f"[THREAD_ROTATION] Retrying with new conversation {new_conversation_id} through complete flow (base_modules will be sent)")
                     return await get_openai_response(
                         message,
                         thread_id=new_conversation_id,

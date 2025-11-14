@@ -148,15 +148,19 @@ HISTORIAL:"""
         return ""
 
 def check_if_5_minutes_since_last_webhook_message(wa_id):
-    """Check if more than 5 minutes have passed since last webhook message from customer"""
+    """Check if more than 5 minutes have passed since last webhook message from customer
+    
+    CRITICAL: This checks the threads.last_webhook_timestamp which is ONLY updated when
+    incoming webhook messages arrive, NOT when the bot sends responses (unlike last_updated).
+    """
     try:
         db_path = "app/thread_store.db"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # Get the last_updated timestamp for this wa_id from threads table
+        # Get the last_webhook_timestamp for this wa_id from threads table
         cursor.execute("""
-            SELECT last_updated FROM threads 
+            SELECT last_webhook_timestamp FROM threads 
             WHERE wa_id = ?
         """, (wa_id,))
         
@@ -164,24 +168,52 @@ def check_if_5_minutes_since_last_webhook_message(wa_id):
         conn.close()
         
         if not result or not result[0]:
-            # No thread found or no last_updated, consider it as needing context
+            # No webhook timestamp found, this is likely the first message
+            # Return True to check for any missed messages just in case
+            print(f"[MISSED_MESSAGES_DEBUG] No webhook timestamp found for {wa_id}, checking for missed messages")
             return True
             
-        last_updated_time = datetime.fromisoformat(result[0])
-        current_time = datetime.now()
+        last_webhook_time_str = result[0]
+        
+        # Parse the timestamp string to datetime
+        # SQLite CURRENT_TIMESTAMP returns format: 'YYYY-MM-DD HH:MM:SS'
+        last_webhook_time = datetime.strptime(last_webhook_time_str, '%Y-%m-%d %H:%M:%S')
+        current_time = datetime.utcnow()
         
         # Check if more than 5 minutes (300 seconds) have passed
-        time_diff = (current_time - last_updated_time).total_seconds()
+        time_diff = (current_time - last_webhook_time).total_seconds()
+        
+        print(f"[MISSED_MESSAGES_DEBUG] {wa_id}: Last webhook at {last_webhook_time_str}, "
+              f"time_diff={time_diff:.1f}s, threshold=300s, check_missed={time_diff > 300}")
+        
         return time_diff > 300
         
     except Exception as e:
         print(f"[ERROR] Failed to check 5-minute gap: {e}")
-        return False
+        # On error, return True to be safe and check for missed messages
+        return True
 
-def get_missed_customer_agent_messages_for_developer_input(wa_id):
-    """Get customer-agent messages missed by webhook since last interaction"""
+def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timestamp_str=None):
+    """Get customer-agent messages that occurred AFTER the assistant's last response
+    
+    Args:
+        wa_id: WhatsApp ID of the customer
+        cutoff_timestamp_str: The PREVIOUS last_updated timestamp (before current response)
+                             This MUST be passed from the webhook handler to avoid race condition
+    """
     
     try:
+        # CRITICAL: Use the PREVIOUS last_updated timestamp passed from the webhook handler
+        # We CANNOT query the database here because it's already been updated by the current response!
+        if not cutoff_timestamp_str:
+            print(f"[MISSED_MESSAGES] No cutoff timestamp provided for {wa_id}, cannot determine cutoff")
+            return ""
+        
+        # Parse the cutoff timestamp
+        last_assistant_response_time = datetime.strptime(cutoff_timestamp_str, '%Y-%m-%d %H:%M:%S')
+        last_assistant_response_time = last_assistant_response_time.replace(tzinfo=timezone.utc)
+        print(f"[MISSED_MESSAGES] Cutoff timestamp (PREVIOUS assistant response) for {wa_id}: {last_assistant_response_time}")
+        
         # Get messages from WATI API
         api_messages = fetch_wati_api_messages(wa_id, pages=5)
         if not api_messages:
@@ -195,26 +227,45 @@ def get_missed_customer_agent_messages_for_developer_input(wa_id):
         
         if not customer_to_agent_messages:
             return ""
+        
+        # CRITICAL FIX: Filter to only messages AFTER the last assistant response
+        gap_messages = []
+        for msg in customer_to_agent_messages:
+            timestamp = msg.get('created', '') or msg.get('createdDateTime', '') or msg.get('timestamp', '')
+            parsed_time = parse_timestamp(timestamp) if timestamp else None
             
+            if parsed_time and parsed_time > last_assistant_response_time:
+                gap_messages.append({
+                    'msg': msg,
+                    'parsed_time': parsed_time,
+                    'timestamp_raw': timestamp
+                })
+        
+        if not gap_messages:
+            print(f"[MISSED_MESSAGES] No messages found after {last_assistant_response_time} for {wa_id}")
+            return ""
+        
+        # Sort by timestamp ascending (chronological order: oldest to newest)
+        gap_messages.sort(
+            key=lambda x: x['parsed_time'] if x['parsed_time'] else datetime.min.replace(tzinfo=timezone.utc)
+        )
+        
+        print(f"[MISSED_MESSAGES] Found {len(gap_messages)} messages in gap for {wa_id}")
+        
         # Format for developer input
         context_lines = []
-        for msg in customer_to_agent_messages[-20:]:  # Last 20 missed messages
-            timestamp = msg.get('createdDateTime', '')
+        for item in gap_messages:
+            msg = item['msg']
+            parsed_time = item['parsed_time']
+            
             text = msg.get('text', '').strip()
             operator_name = msg.get('operatorName', '')
             
             if not text:
                 continue
                 
-            # Parse timestamp
-            timestamp_str = 'Unknown time'
-            if timestamp:
-                try:
-                    parsed_time = parse_timestamp(timestamp)
-                    if parsed_time:
-                        timestamp_str = parsed_time.strftime('%Y-%m-%d %H:%M')
-                except:
-                    pass
+            # Format timestamp
+            timestamp_str = parsed_time.strftime('%Y-%m-%d %H:%M') if parsed_time else 'Unknown time'
             
             # Determine message type
             if operator_name in ['NULL', 'Bot ', 'None', '']:
@@ -570,8 +621,55 @@ def process_agent_context_for_user(wa_id, pages=10):
         print(f"[ERROR] Error processing agent context: {str(e)}")
         return False
 
+def get_manychat_context_for_system_injection(user_identifier):
+    """Get recent conversation messages from local conversation_log for ManyChat users"""
+    
+    try:
+        from app.conversation_log import get_recent_messages
+        
+        # Get last 100 messages from local conversation log
+        messages = get_recent_messages(user_identifier=user_identifier, limit=100)
+        
+        if not messages:
+            print(f"[INFO] No conversation history found for {user_identifier}")
+            return ""
+        
+        print(f"[INFO] Retrieved {len(messages)} messages for context injection")
+        
+        # Format messages for context injection
+        formatted_messages = []
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            timestamp = msg.get('timestamp', '')
+            
+            if role == 'user':
+                formatted_messages.append(f"[Customer] {content}")
+            else:
+                formatted_messages.append(f"[Assistant] {content}")
+        
+        # Use last 50 messages for context (to avoid overwhelming the context window)
+        recent_context = formatted_messages[-50:]
+        context_text = "\n".join(recent_context)
+        
+        injection_message = f"""CONVERSATION CONTEXT FROM PREVIOUS THREAD:
+The conversation thread was rotated due to context length. Below is a summary of the recent conversation history to maintain continuity:
+
+{context_text}
+
+---
+Continue assisting this customer based on the above context. Remember their previous questions and maintain conversation flow."""
+        
+        print(f"[SUCCESS] Generated context injection with {len(recent_context)} messages")
+        return injection_message
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to get ManyChat context: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
 def main():
-    """Main function for testing"""
     if len(sys.argv) < 2:
         print("Usage: python agent_context_injector.py <wa_id> [pages]")
         sys.exit(1)
