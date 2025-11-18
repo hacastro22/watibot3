@@ -1153,7 +1153,7 @@ The following parameters are INJECTED by the system and should NOT be provided b
 
 #### 2.1 New Tool Definitions in openai_agent.py
 
-**Location:** Add to `tools` list in `/home/robin/watibot4/app/openai_agent.py` (after line 199)
+**Location:** Add to `tools` list in `/home/robin/watibot4/app/openai_agent.py` (tools array starts at line 298)
 
 **Tool #1: check_multi_room_availability**
 
@@ -1251,7 +1251,7 @@ The following parameters are INJECTED by the system and should NOT be provided b
 },
 ```
 
-**Also ADD to function mapping dictionary** at line ~1321 in `openai_agent.py` (where `available_functions` is defined):
+**Also ADD to function mapping dictionary** at line 1319 in `openai_agent.py` (where `available_functions` is defined):
 
 ```python
 "check_multi_room_availability": smart_availability.check_multi_room_availability,

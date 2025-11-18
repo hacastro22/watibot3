@@ -26,8 +26,6 @@ from app.clients import manychat_client
 from app import menu_reader
 from app import menu_prices_reader
 from app import operations_tool
-from app.message_humanizer import humanize_response
-
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client for Responses API
@@ -651,11 +649,11 @@ tools = [
                 },
                 "children_0_5": {
                     "type": "integer",
-                    "description": "Number of children 0-5 years old (must be explicitly provided, 0 if none)"
+                    "description": "HEAD COUNT of children aged 0-5 years old (must be explicitly provided, 0 if none). This is the NUMBER OF CHILDREN in this age bracket, NOT the number of child packages purchased for them."
                 },
                 "children_6_10": {
                     "type": "integer",
-                    "description": "Number of children 6-10 years old (must be explicitly provided, 0 if none)"
+                    "description": "HEAD COUNT of children aged 6-10 years old (must be explicitly provided, 0 if none). This is the NUMBER OF CHILDREN in this age bracket who automatically receive child package pricing."
                 },
                 "bungalow_type": {
                     "type": "string",
@@ -929,7 +927,7 @@ async def add_message_to_thread(thread_id: str, content: str):
         
         if previous_response_id:
             response = await openai_client.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 previous_response_id=previous_response_id,
                 input=[
                     {
@@ -943,7 +941,7 @@ async def add_message_to_thread(thread_id: str, content: str):
             save_response_id(user_identifier, response.id)
         else:
             response = await openai_client.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 conversation=thread_id,
                 input=[
                     {
@@ -1461,6 +1459,7 @@ async def get_openai_response(
     phone_number: Optional[str] = None,
     subscriber_id: Optional[str] = None,
     channel: Optional[str] = None,
+    time_since_last_message: Optional[float] = None,
 ) -> Tuple[str, str]:
     """Send message to OpenAI using new Responses API and return response, handling function calls.
 
@@ -1498,6 +1497,11 @@ async def get_openai_response(
     
     # Build the contextualized user message (same as before)
     contextualized_message = (
+        "Persist until the customer's query is fully handled end-to-end within the current turn: "
+        "Before responding, evaluate what additional modules are needed based on core_config, decision_tree and module_dependencies, "
+        "call load_additional_modules to load them, wait for content, then respond using that information. "
+        "Do not stop at partial responses or skip required module loading steps.\n\n"
+        "CRITICAL Agent Discipline: Even if the base modules: core_config, decision_tree and module_dependencies were last sent several turns ago, you must keep obeying every rule they contain. Persist through each customer directive end-to-end—gather all required details, call the mandated tools, validate the outcome, and confirm completion before moving on. No shortcuts, no early exits. "
         f"The current date, day, and time in El Salvador (GMT-6) is {datetime_str}. "
         f"CRITICAL Booking Workflow: "
         f"1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). "
@@ -1715,7 +1719,7 @@ async def get_openai_response(
                     # FIRST API CALL: Send ONLY agent context in developer input
                     # For fresh conversations, use conversation parameter for first call only
                     agent_response = await openai_client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         conversation=conversation_id,
                         input=[
                             {
@@ -1748,17 +1752,22 @@ async def get_openai_response(
             # Always use previous_response_id to avoid stale tool call conflicts
             
             # Determine if we should send system_instructions (base_modules)
-            # Send on: conversation start, after context injection, or every 3 messages
+            # Send on: conversation start, after context injection, every 4 messages, or if >2 hours since last message
+            time_gap_refresh = time_since_last_message and time_since_last_message > 7200  # 2 hours (7200 seconds)
             should_send_base_modules = (
                 not previous_response_id or  # New conversation
                 needs_agent_context or  # Just injected agent context
-                current_message_count % 3 == 0  # Every 3 messages
+                current_message_count % 4 == 0 or  # Every 4 messages
+                time_gap_refresh  # >2 hours since last message (prevents stale module cache)
             )
             
             if should_send_base_modules:
-                logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv={not previous_response_id}, after_context={needs_agent_context}, periodic={current_message_count % 3 == 0})")
+                time_str = f"{time_since_last_message:.1f}s" if time_since_last_message is not None else "N/A"
+                logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv={not previous_response_id}, after_context={needs_agent_context}, periodic={current_message_count % 4 == 0}, time_gap={time_gap_refresh} [{time_str} since last])")
             else:
-                logger.info(f"[MODULE_OPTIMIZATION] Skipping base_modules at message {current_message_count} - using cached from previous_response_id")
+                time_str = f"{time_since_last_message:.1f}s" if time_since_last_message is not None else "N/A"
+                logger.info(f"[MODULE_OPTIMIZATION] Skipping base_modules at message {current_message_count} - using cached from previous_response_id ({time_str} since last)")
+
             
             if previous_response_id:
                 # Continue from existing response
@@ -1786,7 +1795,7 @@ async def get_openai_response(
                 ])
                 
                 response = await openai_client.responses.create(
-                    model="gpt-5",
+                    model="gpt-5.1",
                     previous_response_id=previous_response_id,
                     input=input_messages,
                     tools=tools,
@@ -1797,7 +1806,7 @@ async def get_openai_response(
                 # New conversation - use conversation parameter only for the very first call
                 # Always send system_instructions on first call
                 response = await openai_client.responses.create(
-                    model="gpt-5",
+                    model="gpt-5.1",
                     conversation=conversation_id,
                     input=[
                         {
@@ -1871,7 +1880,7 @@ async def get_openai_response(
                 if agent_context_system_msg:
                     logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh conversation {conversation_id}")
                     agent_response = await openai_client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         conversation=conversation_id,
                         input=[{
                             "type": "message",
@@ -1912,7 +1921,7 @@ async def get_openai_response(
                     ]
                     
                     response = await openai_client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         previous_response_id=agent_response.id,
                         input=input_messages,
                         tools=tools,
@@ -1931,7 +1940,7 @@ async def get_openai_response(
                     logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
                     
                     response = await openai_client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         conversation=conversation_id,
                         input=[
                             {
@@ -2064,7 +2073,7 @@ async def get_openai_response(
                 previous_resp_id = response.id
                 
                 response = await openai_client.responses.create(
-                    model="gpt-5",
+                    model="gpt-5.1",
                     # Use previous_response_id to continue the *same* response turn
                     previous_response_id=previous_resp_id,
                     input=tool_output_input,
@@ -2085,7 +2094,7 @@ async def get_openai_response(
                         try:
                             # Fallback without tools - use conversation for simplicity
                             response = await openai_client.responses.create(
-                                model="gpt-5",
+                                model="gpt-5.1",
                                 conversation=conversation_id,
                                 input=[
                                     {
@@ -2148,7 +2157,7 @@ async def get_openai_response(
                         logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh recovery conversation {conversation_id}")
                         # Fresh conversation recovery - use conversation parameter for first call
                         agent_response = await openai_client.responses.create(
-                            model="gpt-5",
+                            model="gpt-5.1",
                             conversation=conversation_id,
                             input=[{
                                 "type": "message",
@@ -2165,7 +2174,7 @@ async def get_openai_response(
                         
                         # RESTART THE ENTIRE FLOW with fresh conversation - use previous_response_id after context
                         response = await openai_client.responses.create(
-                            model="gpt-5",
+                            model="gpt-5.1",
                             previous_response_id=agent_response.id,
                             input=[
                                 {
@@ -2193,7 +2202,7 @@ async def get_openai_response(
                         logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
                         
                         response = await openai_client.responses.create(
-                            model="gpt-5",
+                            model="gpt-5.1",
                             conversation=conversation_id,
                             input=[
                                 {
@@ -2258,7 +2267,7 @@ async def get_openai_response(
             previous_resp_id = response.id
             
             response = await openai_client.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 previous_response_id=previous_resp_id,
                 input=[
                     {
@@ -2283,7 +2292,7 @@ async def get_openai_response(
                     logger.info("[JSON_GUARD] Detected tool-like JSON, repairing")
                     # JSON repair - use conversation for simplicity since this is error recovery
                     repair_response = await openai_client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         conversation=conversation_id,
                         input=[
                             {
@@ -2306,14 +2315,7 @@ async def get_openai_response(
         
         logger.info(f"Final response from OpenAI: {final_response[:100]}...")
         
-        # HUMANIZATION STEP: Add warmth, empathy, and personality to the response
-        try:
-            humanized_response = await humanize_response(final_response)
-            logger.info(f"Response humanized successfully: {humanized_response[:100]}...")
-            return humanized_response, conversation_id
-        except Exception as humanization_error:
-            logger.error(f"Humanization failed, returning original response: {humanization_error}")
-            return final_response, conversation_id
+        return final_response, conversation_id
         
     except Exception as e:
         logger.error(f"[OpenAI] Error: {str(e)}")
@@ -2325,7 +2327,7 @@ async def get_openai_response(
             try:
                 # Rate limit retry - use conversation for simplicity
                 response = await openai_client.responses.create(
-                    model="gpt-5",
+                    model="gpt-5.1",
                     conversation=conversation_id,
                     input=[
                         {
@@ -2345,13 +2347,7 @@ async def get_openai_response(
                 save_response_id(user_identifier, response.id)
                 final_response = _extract_text_from_output(getattr(response, "output", [])) or "No response after retry."
                 
-                # HUMANIZATION STEP for retry response
-                try:
-                    humanized_response = await humanize_response(final_response)
-                    return humanized_response, conversation_id
-                except Exception as humanization_error:
-                    logger.error(f"Retry humanization failed: {humanization_error}")
-                    return final_response, conversation_id
+                return final_response, conversation_id
             except Exception as retry_error:
                 logger.error(f"Rate limit retry failed: {retry_error}")
                 # Let this bubble up to main.py retry logic instead of returning error message
@@ -2387,7 +2383,7 @@ async def get_openai_response(
                         # FIRST API CALL: Send agent context only  
                         # Fresh conversation - use conversation parameter for first call
                         agent_response = await openai_client.responses.create(
-                            model="gpt-5",
+                            model="gpt-5.1",
                             conversation=new_conversation_id,
                             input=[
                                 {

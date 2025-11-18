@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 from app.adapters.base_channel_adapter import ChannelAdapter
 from app.models.unified_message import MessageType, UnifiedMessage
 from app.clients import manychat_client
-from app.message_humanizer import humanize_response
 from app import conversation_log
 from app.utils.message_splitter import split_message, needs_splitting
 import logging
@@ -109,15 +108,8 @@ class ManyChatIGAdapter(ChannelAdapter):
                 file_path = str(media.get("file_path"))
                 caption = str(media.get("caption")) if media.get("caption") else ""
                 
-                # Humanize caption if present
-                if caption:
-                    try:
-                        humanized_caption = await humanize_response(caption)
-                        logger.info(f"[IG] Caption humanized: {caption[:50]}... -> {humanized_caption[:50]}...")
-                        caption = humanized_caption
-                    except Exception as e:
-                        logger.error(f"[IG] Caption humanization failed, using original: {e}")
-                
+                # Send caption as-is
+
                 resp = await manychat_client.send_media_message(
                     subscriber_id=user_id,
                     file_path=file_path,
@@ -132,18 +124,10 @@ class ManyChatIGAdapter(ChannelAdapter):
                 logger.info(f"[IG] Empty message for {user_id} - assuming content already sent via tool")
                 return True
             
-            # Humanize the message before sending
-            try:
-                humanized_message = await humanize_response(message)
-                logger.info(f"[IG] Message humanized: {message[:50]}... -> {humanized_message[:50]}...")
-            except Exception as e:
-                logger.error(f"[IG] Humanization failed, using original message: {e}")
-                humanized_message = message
-            
             # Check if message needs splitting due to ManyChat's 2000-char limit
-            if needs_splitting(humanized_message):
-                chunks = split_message(humanized_message)
-                logger.warning(f"[IG] Message exceeds 2000 chars ({len(humanized_message)} chars), splitting into {len(chunks)} parts")
+            if needs_splitting(message):
+                chunks = split_message(message)
+                logger.warning(f"[IG] Message exceeds 2000 chars ({len(message)} chars), splitting into {len(chunks)} parts")
                 
                 # Send each chunk sequentially
                 for idx, chunk in enumerate(chunks, 1):
@@ -159,7 +143,7 @@ class ManyChatIGAdapter(ChannelAdapter):
                 
                 # Log the complete message (all chunks combined) for context preservation
                 try:
-                    conversation_log.log_message(user_id, "assistant", humanized_message, "instagram")
+                    conversation_log.log_message(user_id, "assistant", message, "instagram")
                 except Exception as e:
                     logger.error(f"[IG] Failed to log assistant message: {e}")
                 
@@ -169,11 +153,12 @@ class ManyChatIGAdapter(ChannelAdapter):
                 # Message fits within limit, send normally
                 # Log assistant response for context preservation
                 try:
-                    conversation_log.log_message(user_id, "assistant", humanized_message, "instagram")
+                    conversation_log.log_message(user_id, "assistant", message, "instagram")
                 except Exception as e:
                     logger.error(f"[IG] Failed to log assistant message: {e}")
                 
-                resp = await manychat_client.send_ig_text_message(user_id, humanized_message)
+                resp = await manychat_client.send_ig_text_message(user_id, message)
                 return resp is not None
-        except Exception:
+        except Exception as e:
+            logger.exception(f"[IG] Error sending message to {user_id}: {e}")
             return False

@@ -328,7 +328,7 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                     # Continue existing conversation with instructions and tools
                     logger.info(f"[IMAGE_CLASSIFIER] Continuing conversation with system instructions and tools")
                     response = await client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         previous_response_id=previous_response_id,
                         instructions=instructions_text,
                         input=[image_input],
@@ -339,7 +339,7 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                     # New conversation or recovery from error
                     logger.info(f"[IMAGE_CLASSIFIER] Starting {'new' if recovery_attempts == 0 else 'fresh recovery'} conversation with system instructions and tools")
                     response = await client.responses.create(
-                        model="gpt-5",
+                        model="gpt-5.1",
                         conversation=conversation_id,
                         instructions=instructions_text,
                         input=[image_input],
@@ -386,7 +386,7 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                     if agent_context_system_msg:
                         logger.info(f"[IMAGE_CLASSIFIER] Injecting agent context for fresh recovery conversation {conversation_id}")
                         agent_response = await client.responses.create(
-                            model="gpt-5",
+                            model="gpt-5.1",
                             conversation=conversation_id,
                             input=[{
                                 "type": "message",
@@ -459,7 +459,7 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
             
             # Send tool results back to the API to continue the conversation
             response = await client.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 previous_response_id=response.id,
                 input=tool_results,
                 tools=openai_agent.tools,

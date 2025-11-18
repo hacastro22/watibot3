@@ -430,7 +430,7 @@ def inject_agent_context_to_thread(wa_id, context_message):
         
         if previous_response_id:
             response = openai.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 previous_response_id=previous_response_id,
                 input=[
                     {
@@ -442,7 +442,7 @@ def inject_agent_context_to_thread(wa_id, context_message):
             )
         else:
             response = openai.responses.create(
-                model="gpt-5",
+                model="gpt-5.1",
                 conversation=thread_id,
                 input=[
                     {

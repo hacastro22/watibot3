@@ -39,6 +39,11 @@ caption_cache_lock = threading.Lock()
 pending_messages = {}
 pending_messages_lock = threading.Lock()
 
+# Cache of keys already processed by main webhook before universal tracking kicks in
+# Structure: {message_key: expires_at_timestamp}
+processed_message_cache = {}
+processed_message_cache_lock = threading.Lock()
+
 # Active safety net threads tracking to prevent thread explosion
 # Structure: {message_key: thread_object}
 active_safety_threads = {}
@@ -169,6 +174,11 @@ def mark_message_processed(wa_id: str, message_text: str, message_type: str = No
         if message_key in pending_messages:
             pending_messages[message_key]["processed"] = True
             logger.info(f"[SAFETY_NET] Marked message as processed: {message_key}")
+            return
+    # If universal hasn't stored the message yet, cache the processed key temporarily
+    with processed_message_cache_lock:
+        processed_message_cache[message_key] = time.time() + 30  # keep for 30s
+        logger.debug(f"[SAFETY_NET] Cached processed key awaiting universal tracking: {message_key}")
 
 
 def safety_net_task(wa_id: str, message_data: dict, message_key: str):
@@ -941,6 +951,7 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
         # CRITICAL FIX: Check for missed messages using PREVIOUS webhook timestamp
         # The timestamp was already updated in webhook handler, so we use the old one we saved
         missed_messages_prompt = ""
+        time_diff = None  # Initialize time_diff for module optimization
         if previous_webhook_timestamp:
             try:
                 # Parse the timestamp string (datetime already imported at top of file)
@@ -965,6 +976,7 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
                     logger.info(f"[MISSED_MESSAGES_CHECK] Less than 5 minutes since previous message for {wa_id}")
             except Exception as e:
                 logger.exception(f"[MISSED_MESSAGES_CHECK] Error checking missed messages for {wa_id}: {e}")
+                time_diff = None  # Reset on error
         else:
             logger.info(f"[MISSED_MESSAGES_CHECK] No previous webhook timestamp for {wa_id} (first message)")
         
@@ -985,7 +997,7 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
                 logger.info(f"[BUFFER] Attempt {attempt} to get OpenAI response for {wa_id} (elapsed: {elapsed:.1f}s)")
                 aio_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(aio_loop)
-                ai_response, new_thread_id = aio_loop.run_until_complete(openai_agent.get_openai_response(prompt, thread_id, wa_id))
+                ai_response, new_thread_id = aio_loop.run_until_complete(openai_agent.get_openai_response(prompt, thread_id, wa_id, time_since_last_message=time_diff))
                 aio_loop.close()
                 logger.info(f"[BUFFER] OpenAI response for {wa_id}: {ai_response!r}")
                 
@@ -1346,6 +1358,14 @@ async def universal_webhook(request: Request):
         # Start a background task to forward if it doesn't arrive within 10 seconds
         if operator_name is None and wa_id and caption_text:
             message_key = generate_message_key(wa_id, caption_text or file_path or "", message_type)
+
+            # Skip tracking if main webhook already marked this key processed before universal arrived
+            with processed_message_cache_lock:
+                processed_expiry = processed_message_cache.get(message_key)
+                if processed_expiry and processed_expiry > time.time():
+                    del processed_message_cache[message_key]
+                    logger.info(f"[SAFETY_NET] Skipping tracking for message already processed: {message_key}")
+                    return {"status": "ignored", "reason": "already_processed"}
             
             # Check if safety net thread already running for this message
             with active_safety_threads_lock:
@@ -1361,6 +1381,13 @@ async def universal_webhook(request: Request):
                     "timestamp": time.time(),
                     "processed": False
                 }
+                # If main webhook already processed this key, mark immediately
+                with processed_message_cache_lock:
+                    processed_expiry = processed_message_cache.get(message_key)
+                    if processed_expiry and processed_expiry > time.time():
+                        pending_messages[message_key]["processed"] = True
+                        del processed_message_cache[message_key]
+                        logger.info(f"[SAFETY_NET] Immediate mark for pending message (already processed): {message_key}")
             
             # Start background safety net task (only if not already running)
             safety_thread = threading.Thread(
@@ -1486,14 +1513,6 @@ async def wati_webhook(request: Request):
         msg_preview = msg_preview.replace('\n', ' ').replace('\r', '')
         logger.info(f"[DEBUG] Parsed waId: {phone_number}, message: {msg_preview!r}, replyContextId: {reply_context_id}, caption: {text_content if message != text_content else 'N/A'}")
 
-        # SAFETY NET: Mark message as processed to prevent duplicate forwarding from universal webhook
-        if phone_number and message:
-            # Debug: Generate the same message_key to verify it matches universal webhook
-            import hashlib
-            test_key = f"{phone_number}:{hashlib.md5(f'{message}:{message_type_wati}'.encode()).hexdigest()[:12]}"
-            logger.info(f"[SAFETY_NET_DEBUG] Attempting to mark processed: wa_id={phone_number}, message={message[:50]!r}, type={message_type_wati}, key={test_key}")
-            mark_message_processed(phone_number, message, message_type_wati)
-
         if not phone_number:
             logger.error("Missing phone number in payload")
             return {"status": "error", "detail": "Missing phone number in payload"}
@@ -1565,6 +1584,14 @@ async def wati_webhook(request: Request):
             else:
                 logger.warning(f"[WEBHOOK] Ignoring message with no processable content. Payload: {data}")
                 return {"status": "ok", "detail": "Message type ignored"}
+
+        # SAFETY NET: Mark message as processed to prevent duplicate forwarding from universal webhook
+        tracking_content = content or message
+        tracking_type = message_type or message_type_wati or 'text'
+        if phone_number and tracking_content:
+            message_key = generate_message_key(phone_number, tracking_content, tracking_type)
+            logger.info(f"[SAFETY_NET_DEBUG] Marking processed key={message_key} (type={tracking_type})")
+            mark_message_processed(phone_number, tracking_content, tracking_type)
 
         # 4. Caption Cache Lookup: For images, check universal webhook cache
         cached_reply_context_id = None
