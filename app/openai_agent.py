@@ -666,15 +666,15 @@ tools = [
                 },
                 "city": {
                     "type": "string",
-                    "description": "Customer's city of origin (must be explicitly provided)"
+                    "description": "Customer's city of origin (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' or 'No proporcionado' - if customer hasn't provided their city, ASK THEM before calling make_booking."
                 },
                 "dui_passport": {
                     "type": "string",
-                    "description": "Customer's DUI or passport number (must be explicitly provided)"
+                    "description": "Customer's DUI or passport number (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' - if customer hasn't provided their DUI/passport, ASK THEM before calling make_booking."
                 },
                 "nationality": {
                     "type": "string",
-                    "description": "Customer's nationality (must be explicitly provided)"
+                    "description": "Customer's nationality (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' - if customer hasn't provided their nationality, ASK THEM before calling make_booking."
                 },
                 "check_in_date": {
                     "type": "string",
@@ -690,11 +690,11 @@ tools = [
                 },
                 "children_0_5": {
                     "type": "integer",
-                    "description": "HEAD COUNT of children aged 0-5 years old (must be explicitly provided, 0 if none). This is the NUMBER OF CHILDREN in this age bracket, NOT the number of child packages purchased for them."
+                    "description": "Number of children aged 0-5 years old (FREE - no package needed). Use 0 if none. CRITICAL: This field is for infants/toddlers who are FREE. Do NOT put 'paquete niño' purchases here."
                 },
                 "children_6_10": {
                     "type": "integer",
-                    "description": "HEAD COUNT of children aged 6-10 years old (must be explicitly provided, 0 if none). This is the NUMBER OF CHILDREN in this age bracket who automatically receive child package pricing."
+                    "description": "Number of children aged 6-10 years old who have PAID child packages ('paquete niño'). Use 0 if none. CRITICAL: When customer purchases 'paquete niño' or 'paquetes de niño', put the count HERE (not in children_0_5). This is the field that charges the child rate."
                 },
                 "bungalow_type": {
                     "type": "string",
