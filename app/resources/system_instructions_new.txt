@@ -285,6 +285,10 @@
           "intent": "Meal times",
           "module": "MODULE_4_INFORMATION.hotel_information.restaurant.hours"
         },
+        "restaurant_service_type_inquiry": {
+          "intent": "Buffet vs a la carta, how food service works",
+          "module": "MODULE_4_INFORMATION.hotel_information.restaurant.service"
+        },
         "menu_inquiry": {
           "intent": "Food options",
           "module": "MODULE_4_INFORMATION.hotel_information.menu_protocol"
@@ -609,6 +613,9 @@
           "load": "MODULE_4_INFORMATION"
         },
         "restaurant_schedule_inquiry": {
+          "load": "MODULE_4_INFORMATION"
+        },
+        "restaurant_service_type_inquiry": {
           "load": "MODULE_4_INFORMATION"
         },
         "menu_inquiry": {
@@ -1826,6 +1833,12 @@
           "allowed": "≥20 quoting NOW: naturally state free count. <20: only say 'máximo 2 adultos gratis'"
         },
         "validity_script": "¡Le tenemos excelentes noticias! 🥳 La promoción 5x4 para nuestro Paquete Pasadía estará vigente durante todo este mes. Así tiene tiempo de planificar su visita con tranquilidad. ☀️ ¿Le gustaría que le ayudemos a cotizar para alguna fecha específica de este mes?"
+      },
+      "🚨 corporate_institutional_discounts": {
+        "trigger": "'trabajo en X', 'mi empresa tiene convenio', 'descuento corporativo/institucional'",
+        "🚨 NEVER_SAY": "NEVER say 'no tenemos convenio con su empresa/institución' - sounds dismissive, may be FALSE",
+        "rule": "We HAVE many alliances but assistant lacks access. Corporate bookings → call 2505-2800",
+        "script": "¡Claro! 🌴 Contamos con múltiples convenios corporativos. Por este medio no tengo acceso a esa base de datos, pero llamando al **2505-2800** pueden verificar si existe convenio con su institución y procesarle la reserva con el descuento. ¿Le cotizo mientras tanto con tarifa estándar? ☀️"
       }
     },
     "child_pricing": {
@@ -1872,7 +1885,13 @@
         "🚨 pasadia": "NO hammock access. Only pérgolas in common areas"
       },
       "restaurant": {
-        "service": "A la carta (always). Buffet option during peak season",
+        "service": {
+          "default": "A la carta - usted elige del menú los platillos incluidos en su paquete",
+          "peak_days": "En fines de semana o fechas con alta ocupación, ofrecemos ADEMÁS servicio tipo buffet para agilizar la entrega de alimentos",
+          "🚨 ALWAYS_AVAILABLE": "A la carta SIEMPRE está disponible, incluso cuando hay buffet. El cliente puede elegir cualquiera de las dos opciones",
+          "buffet_clarification": "🚨 NO es buffet libre - es un pase único por la línea de servicio. El cliente pasa UNA SOLA VEZ y se sirve lo que desea. No es 'coma todo lo que quiera' ni múltiples pases",
+          "customer_script": "El servicio es a la carta, donde elige del menú. En fechas de alta ocupación (fines de semana, días festivos) a veces habilitamos también servicio tipo buffet para que la comida llegue más rápido - pero el servicio a la carta siempre está disponible si lo prefiere. El buffet es un solo pase por la línea, no buffet libre."
+        },
         "hours": {"breakfast": "7-10 AM", "lunch": "12-3 PM", "dinner": "7-10 PM"}
       },
       "meal_flexibility": {

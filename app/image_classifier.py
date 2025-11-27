@@ -5,7 +5,7 @@ This module provides functionality to classify uploaded images based on both
 image content and conversation context to determine if they are payment proofs
 or other types of images.
 
-Uses the same gpt-4o-mini model as the payment proof analyzer for consistency.
+Uses gpt-5-mini model with Flex tier for cost optimization (upgraded from gpt-4o-mini).
 """
 import os
 import json
@@ -15,6 +15,8 @@ import asyncio
 import httpx
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
+
+from .flex_tier_handler import call_with_flex_fallback
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -125,13 +127,30 @@ async def classify_image_with_context(
             }
         ]
 
-        # Step 4: Call OpenAI API using Chat Completions API (like watibot3)
-        logger.info(f"[IMAGE_CLASSIFIER] Calling OpenAI API for classification")
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=1024
+        # Step 4: Call OpenAI API using Chat Completions API with Flex tier
+        logger.info(f"[IMAGE_CLASSIFIER] Calling OpenAI API for classification (Flex tier with fallback)")
+        
+        async def _flex_call():
+            return await client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=1024,
+                service_tier="flex"
+            )
+        
+        async def _standard_call():
+            return await client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=1024
+            )
+        
+        response = await call_with_flex_fallback(
+            flex_call=_flex_call,
+            standard_call=_standard_call,
+            operation_name=f"image_classifier:{wa_id}"
         )
 
         # Step 5: Parse and validate response

@@ -12,6 +12,7 @@ import httpx
 
 from openai import AsyncOpenAI
 from . import config, database_client
+from .flex_tier_handler import call_with_flex_fallback
 from . import compraclick_tool
 from . import payment_proof_analyzer
 from app import bank_transfer_tool
@@ -30,6 +31,46 @@ logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client for Responses API
 openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+
+
+async def _make_responses_call(
+    use_flex: bool,
+    user_identifier: str,
+    **kwargs
+) -> Any:
+    """
+    Make a Responses API call with optional Flex tier.
+    
+    When use_flex=True, attempts Flex tier first with 2-min timeout,
+    falling back to Standard on timeout or error.
+    
+    Args:
+        use_flex: Whether to try Flex first with fallback
+        user_identifier: For logging purposes
+        **kwargs: Arguments for responses.create()
+    
+    Returns:
+        API response
+    """
+    if not use_flex:
+        # Standard only - no Flex attempt
+        return await openai_client.responses.create(**kwargs)
+    
+    # Flex with fallback
+    async def _flex():
+        return await openai_client.responses.create(
+            **kwargs,
+            service_tier="flex"
+        )
+    
+    async def _standard():
+        return await openai_client.responses.create(**kwargs)
+    
+    return await call_with_flex_fallback(
+        flex_call=_flex,
+        standard_call=_standard,
+        operation_name=f"responses:{user_identifier}"
+    )
 
 
 def _extract_text_from_output(output_items: List[Any]) -> str:
@@ -1777,7 +1818,9 @@ async def get_openai_response(
                     }
                 ]
                 
-                response = await openai_client.responses.create(
+                response = await _make_responses_call(
+                    use_flex=True,
+                    user_identifier=user_identifier,
                     model="gpt-5.1",
                     previous_response_id=previous_response_id,
                     input=input_messages,
@@ -1788,7 +1831,9 @@ async def get_openai_response(
             else:
                 # New conversation - use conversation parameter only for the very first call
                 # Always send system_instructions on first call
-                response = await openai_client.responses.create(
+                response = await _make_responses_call(
+                    use_flex=True,
+                    user_identifier=user_identifier,
                     model="gpt-5.1",
                     conversation=conversation_id,
                     input=[
@@ -1952,6 +1997,10 @@ async def get_openai_response(
         recovery_attempts = 0  # Circuit breaker for recovery loops
         max_recovery_attempts = 2
         all_tool_outputs = []  # Keep track for potential synthesis
+        
+        # FLEX TIER: Track tier state for this request
+        # Start with Flex, switch to Standard when non-module tools are detected
+        current_tier_is_flex = True
 
         while round_count < max_tool_rounds:
             round_count += 1
@@ -1967,6 +2016,18 @@ async def get_openai_response(
                 fn_name = getattr(tc, "name", None)
                 raw_args = getattr(tc, "arguments", None)
                 call_id = getattr(tc, "call_id", None) or getattr(tc, "id", None)
+                
+                # ================================================================
+                # FLEX TIER SWITCHING LOGIC
+                # ================================================================
+                # load_additional_modules is safe for Flex (just reads local files)
+                # All other tools require Standard tier for reliability
+                if fn_name != "load_additional_modules":
+                    if current_tier_is_flex:
+                        logger.info(f"[TIER] Tool '{fn_name}' detected, switching to Standard tier for rest of chain")
+                        current_tier_is_flex = False
+                else:
+                    logger.info(f"[TIER] Tool '{fn_name}' is safe for Flex tier")
                 
                 logger.info(f"[Tool] Round {round_count} - Requested: {fn_name} with call_id: {call_id} args={raw_args}")
 
@@ -2048,7 +2109,10 @@ async def get_openai_response(
                 # Capture the ID of the response that requested the tool call
                 previous_resp_id = response.id
                 
-                response = await openai_client.responses.create(
+                # Use tracked tier (Flex if only load_additional_modules called, Standard otherwise)
+                response = await _make_responses_call(
+                    use_flex=current_tier_is_flex,
+                    user_identifier=user_identifier,
                     model="gpt-5.1",
                     # Use previous_response_id to continue the *same* response turn
                     previous_response_id=previous_resp_id,

@@ -365,7 +365,7 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
             model="gpt-5-mini",
             messages=messages,
             response_format={"type": "json_object"},
-            max_tokens=2048  # Increased tokens for the larger response format
+            max_completion_tokens=2048  # gpt-5-mini requires max_completion_tokens
         )
 
         # Parse response

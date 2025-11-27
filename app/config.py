@@ -38,3 +38,8 @@ MANYCHAT_INSTAGRAM_API_KEY = os.getenv('MANYCHAT_INSTAGRAM_API_KEY')  # Instagra
 
 # Public media base URL used to build public links for media sent via ManyChat
 PUBLIC_MEDIA_BASE_URL = os.getenv('PUBLIC_MEDIA_BASE_URL', 'https://media.example.com')
+
+# Flex Tier Configuration
+# Enable/disable Flex tier for cost savings (50% cheaper but higher latency)
+FLEX_ENABLED = os.getenv("FLEX_ENABLED", "true").lower() == "true"
+FLEX_TIMEOUT_SECONDS = int(os.getenv("FLEX_TIMEOUT_SECONDS", "120"))  # 2 minutes
