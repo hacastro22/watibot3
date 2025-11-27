@@ -13,7 +13,7 @@ import pandas as pd
 from typing import Dict, Optional, Any
 from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeoutError
 from . import config
-from .database_client import get_db_connection
+from .database_client import get_db_connection, execute_with_retry
 from .wati_client import send_wati_message
 from .compraclick_retry import start_compraclick_retry_process
 from datetime import datetime
@@ -171,16 +171,13 @@ async def login_and_download_report(page: Page, email: str, password: str) -> st
     return download_file_path
 
 async def process_xls_and_insert_to_db(file_path: str) -> dict:
-    """Processes the downloaded XLS file and inserts data into the compraclick table."""
+    """
+    Processes the downloaded XLS file and inserts data into the compraclick table.
+    Uses infinite retry for database operations.
+    """
     logger.info(f"Starting process with file: {file_path}")
     
-    inserted_count = 0
-    skipped_count = 0
-    error_count = 0
-    
-    conn = None
-    cursor = None
-    
+    # --- FILE PARSING PHASE (no retry needed - file is read once) ---
     try:
         # Read Excel file without header assumption (read as raw data)
         df = pd.read_excel(file_path, header=None)
@@ -191,7 +188,6 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
         logger.info(f"Processing {len(data_rows)} data rows (skipped first row)")
         
         # Define column mappings from Excel file to database schema (matching JS reference)
-        # Based on JS column map - these are 0-indexed positions in the Excel file
         column_map = {
             'date': 0,           # Date column (timestamp)
             'sucursal': 2,       # Branch name 
@@ -214,24 +210,21 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
         def clean_decimal_value(value):
             if value is None or pd.isna(value):
                 return None
-            
-            # Convert to string if it's not already
             string_value = str(value).strip()
-            
-            # If it's empty, return None
             if string_value == '':
                 return None
-            
-            # Remove commas (thousands separators) and keep only numbers, dots, and minus signs
             cleaned_value = string_value.replace(',', '')
-            
-            # Validate that the result is a valid number
             try:
-                numeric_value = float(cleaned_value)
-                return numeric_value
+                return float(cleaned_value)
             except ValueError:
                 logger.warning(f"Could not parse decimal value '{string_value}' - returning None")
                 return None
+        
+        def safe_string(value):
+            """Convert None or NaN values to empty string for NOT NULL columns"""
+            if value is None or pd.isna(value):
+                return ''
+            return str(value).strip()
         
         # Collect valid rows to be processed
         valid_rows = []
@@ -242,7 +235,6 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
                 logger.info(f"Skipping row {i + 1}: insufficient columns")
                 continue
             
-            # Extract values using the column mapping
             try:
                 date = row[column_map['date']] if len(row) > column_map['date'] else None
                 sucursal = row[column_map['sucursal']] if len(row) > column_map['sucursal'] else ''
@@ -258,29 +250,18 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
                 autorizacion = row[column_map['autorizacion']] if len(row) > column_map['autorizacion'] else ''
                 descripcion = row[column_map['descripcion']] if len(row) > column_map['descripcion'] else ''
                 
-                # Clean the importe value to remove comma thousands separators (matching JS logic)
                 importe = clean_decimal_value(raw_importe)
                 
-                # Skip rows with missing essential data (matching JS logic)
                 if not date or importe is None:
                     logger.info(f"Skipping row {i + 1}: missing date or importe")
                     continue
                 
-                # Convert date to datetime if it's not already
                 if not isinstance(date, pd.Timestamp):
                     try:
                         date = pd.to_datetime(date)
                     except:
                         logger.warning(f"Could not parse date '{date}' in row {i + 1}")
                         continue
-                
-                # Add to valid rows for processing
-                # CRITICAL: Ensure all values are properly cleaned for NOT NULL database columns
-                def safe_string(value):
-                    """Convert None or NaN values to empty string for NOT NULL columns"""
-                    if value is None or pd.isna(value):
-                        return ''
-                    return str(value).strip()
                 
                 valid_rows.append({
                     'row_index': i + 1,
@@ -291,7 +272,7 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
                     'cliente': safe_string(cliente),
                     'documento': safe_string(documento),
                     'email': safe_string(email),
-                    'direccion': safe_string(direccion),  # This was causing the null constraint error
+                    'direccion': safe_string(direccion),
                     'marcatarjeta': safe_string(marcatarjeta),
                     'tarjeta': safe_string(tarjeta),
                     'importe': importe,
@@ -305,215 +286,190 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
         
         # Sort rows by date in ascending order (CRITICAL - matching JS logic)
         valid_rows.sort(key=lambda x: x['date'])
-        
         logger.info(f"Processing {len(valid_rows)} valid rows in date order")
         
-        # Connect to database
-        conn = get_db_connection()
-        if not conn:
-            return {"success": False, "inserted": 0, "skipped": 0, "message": "Database connection failed."}
-        
-        cursor = conn.cursor()
-
-        # --- Schema Migration: Ensure 'used' column exists ---
-        try:
-            cursor.execute("ALTER TABLE compraclick ADD COLUMN used DECIMAL(10, 2) NOT NULL DEFAULT 0.00")
-            conn.commit()
-            logger.info("Added 'used' column to 'compraclick' table.")
-        except Exception as e:
-            if "Duplicate column name" in str(e):
-                logger.info("'used' column already exists.")
-                conn.rollback() # Rollback the failed ALTER TABLE statement
-            else:
-                raise e # Re-raise other errors
-        
-        # Prepare insertion query
-        insert_query = """
-            INSERT INTO compraclick 
-            (date, sucursal, usuario, estado, cliente, documento, email, direccion, 
-             marcatarjeta, tarjeta, importe, autorizacion, descripcion, used)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        
-        # Most precise duplicate detection - use importe and autorizacion only
-        check_duplicate_query = """
-            SELECT COUNT(*) as count FROM compraclick 
-            WHERE importe = %s AND autorizacion = %s
-        """
-        
-        # Process sorted rows (EXACTLY matching JS logic with proper MySQL date conversion)
-        for row in valid_rows:
-            try:
-                # Convert date to MySQL format (needed for Python, JS handles this automatically)
-                mysql_date = row['date'] if isinstance(row['date'], str) else row['date'].strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Check for duplicates (most precise logic)
-                cursor.execute(check_duplicate_query, (
-                    row['importe'],
-                    row['autorizacion']
-                ))
-                
-                duplicate_result = cursor.fetchone()
-                
-                # Skip if duplicate found (EXACT JS logic)
-                if duplicate_result and duplicate_result[0] > 0:
-                    logger.info(f"Skipping row {row['row_index']}: duplicate entry detected ({row['cliente']}, {row['date']})")
-                    skipped_count += 1
-                    continue
-                
-                # Insert into database (EXACT JS logic with MySQL date conversion)
-                cursor.execute(insert_query, (
-                    mysql_date,  # MySQL-compatible date format
-                    row['sucursal'],
-                    row['usuario'],
-                    row['estado'],
-                    row['cliente'],
-                    row['documento'],
-                    row['email'],
-                    row['direccion'],
-                    row['marcatarjeta'],
-                    row['tarjeta'],
-                    row['importe'],
-                    row['autorizacion'],
-                    row['descripcion'],
-                    0.0  # Initial 'used' amount
-                ))
-                
-                inserted_count += 1
-                logger.info(f"Inserted row {row['row_index']}: {row['cliente']}, {row['date']}, {row['importe']}")
-                
-            except Exception as e:
-                logger.error(f"Error inserting row {row['row_index']}: {e}")
-                error_count += 1
-        
-        # Commit all changes
-        conn.commit()
-        
-        logger.info(f"Rows inserted: {inserted_count}")
-        logger.info(f"Rows skipped: {skipped_count}")
-        logger.info(f"Rows with errors: {error_count}")
-        
-        return {
-            "success": True, 
-            "inserted": inserted_count, 
-            "skipped": skipped_count,
-            "errors": error_count
-        }
-        
     except Exception as e:
-        logger.error(f"Fatal error during CompraClick sync process: {e}")
-        if conn:
-            conn.rollback()
-        return {
-            "success": False, 
-            "inserted": inserted_count, 
-            "skipped": skipped_count, 
-            "message": str(e)
-        }
+        logger.error(f"Fatal error during file parsing: {e}")
+        return {"success": False, "inserted": 0, "skipped": 0, "message": str(e)}
     
-    finally:
-        # Clean up database connection
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-        logger.info("Database connection closed")
+    # --- DATABASE INSERTION PHASE (with infinite retry) ---
+    def _execute_database_insertion():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            
+            inserted_count = 0
+            skipped_count = 0
+            error_count = 0
+
+            # Schema Migration: Ensure 'used' column exists
+            try:
+                cursor.execute("ALTER TABLE compraclick ADD COLUMN used DECIMAL(10, 2) NOT NULL DEFAULT 0.00")
+                conn.commit()
+                logger.info("Added 'used' column to 'compraclick' table.")
+            except Exception as e:
+                if "Duplicate column name" in str(e):
+                    logger.info("'used' column already exists.")
+                    conn.rollback()
+                else:
+                    raise e
+            
+            insert_query = """
+                INSERT INTO compraclick 
+                (date, sucursal, usuario, estado, cliente, documento, email, direccion, 
+                 marcatarjeta, tarjeta, importe, autorizacion, descripcion, used)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            check_duplicate_query = """
+                SELECT COUNT(*) as count FROM compraclick 
+                WHERE importe = %s AND autorizacion = %s
+            """
+            
+            for row in valid_rows:
+                try:
+                    mysql_date = row['date'] if isinstance(row['date'], str) else row['date'].strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    cursor.execute(check_duplicate_query, (row['importe'], row['autorizacion']))
+                    duplicate_result = cursor.fetchone()
+                    
+                    if duplicate_result and duplicate_result[0] > 0:
+                        logger.info(f"Skipping row {row['row_index']}: duplicate entry detected ({row['cliente']}, {row['date']})")
+                        skipped_count += 1
+                        continue
+                    
+                    cursor.execute(insert_query, (
+                        mysql_date,
+                        row['sucursal'],
+                        row['usuario'],
+                        row['estado'],
+                        row['cliente'],
+                        row['documento'],
+                        row['email'],
+                        row['direccion'],
+                        row['marcatarjeta'],
+                        row['tarjeta'],
+                        row['importe'],
+                        row['autorizacion'],
+                        row['descripcion'],
+                        0.0
+                    ))
+                    
+                    inserted_count += 1
+                    logger.info(f"Inserted row {row['row_index']}: {row['cliente']}, {row['date']}, {row['importe']}")
+                    
+                except Exception as e:
+                    logger.error(f"Error inserting row {row['row_index']}: {e}")
+                    error_count += 1
+            
+            conn.commit()
+            
+            logger.info(f"Rows inserted: {inserted_count}")
+            logger.info(f"Rows skipped: {skipped_count}")
+            logger.info(f"Rows with errors: {error_count}")
+            
+            return {
+                "success": True, 
+                "inserted": inserted_count, 
+                "skipped": skipped_count,
+                "errors": error_count
+            }
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+            logger.info("Database connection closed")
+    
+    return execute_with_retry(_execute_database_insertion, f"process_xls_and_insert_to_db({file_path})")
 
 async def validate_compraclick_payment(authorization_number: str, booking_total: float) -> dict:
     """
     Validates a CompraClick payment by checking the remaining balance against the booking total.
+    Uses infinite retry for database operations.
     
     IMPORTANT: This function only validates - it does NOT update the database.
     Use reserve_compraclick_payment() to actually reserve the amount after booking succeeds.
     """
-    conn = get_db_connection()
-    if not conn:
-        return {"success": False, "data": {}, "error": "Database connection failed"}
-    
-    cursor = conn.cursor(dictionary=True)
-    # Check payment without locking for update
-    query = "SELECT importe, used, codreser, dateused FROM compraclick WHERE autorizacion = %s"
-    
-    try:
-        cursor.execute(query, (authorization_number,))
-        result = cursor.fetchone()
-        
-        if not result:
-            return {
-                "success": False, 
-                "data": {"is_valid": False}, 
-                "error": "Authorization code not found",
-                "customer_message": "No hemos podido encontrar el número de autorización proporcionado. Por favor, revise su correo electrónico para encontrar el comprobante de pago de CompraClick que contiene el número de autorización y envíenoslo, ya que necesitamos ese número para verificar su pago y proceder con su reserva. Este comprobante se enví de parte del Banco de América Central como un archivo adjunto en PDF. 📧"
-            }
-
-        importe = float(result['importe'])
-        used = float(result['used'])
-        remaining_amount = importe - used
-
-        # Payment is valid if the remaining balance can cover at least 50% of the booking.
-        is_valid = remaining_amount >= (booking_total * 0.5)
-
-        # Validation successful - return payment info without updating database
-        if is_valid:
-            logger.info(f"Successfully validated CompraClick payment '{authorization_number}'. Remaining balance: {remaining_amount}")
-            data = {
-                "authorization_code": authorization_number,
-                "remaining_amount": remaining_amount,
-                "booking_total": booking_total,
-                "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
-                "is_valid": is_valid
-            }
-            return {"success": True, "data": data, "error": ""}
-        else:
-            # Payment found but insufficient balance - provide detailed usage information
-            logger.warning(f"CompraClick payment '{authorization_number}' validation failed. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
-            
-            # Get additional details about previous usage
-            codreser = result.get('codreser', '') or 'N/A'
-            dateused = result.get('dateused', '') or 'N/A'
-            original_amount = importe
-            
-            customer_message = (
-                f"Hemos encontrado su pago con autorización {authorization_number} por ${original_amount:.2f}, "
-                f"pero este pago ya ha sido utilizado previamente. "
-                f"\n\n📋 **Detalles del uso anterior:**\n"
-                f"• Reserva(s): {codreser}\n"
-                f"• Fecha de uso: {dateused}\n"
-                f"• Saldo restante: ${remaining_amount:.2f}\n\n"
-                f"Si necesita realizar una nueva reserva, puedo generar un nuevo enlace de pago CompraClick. "
-                f"¿Le gustaría que proceda con esto? 💳"
-            )
-            
-            data = {
-                "authorization_code": authorization_number,
-                "remaining_amount": remaining_amount,
-                "original_amount": original_amount,
-                "booking_total": booking_total,
-                "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
-                "is_valid": is_valid,
-                "previous_bookings": codreser,
-                "date_used": dateused
-            }
-            
-            return {
-                "success": False, 
-                "data": data, 
-                "error": "Payment already used",
-                "customer_message": customer_message
-            }
-
-    except Exception as e:
-        logger.exception("Error validating CompraClick payment")
-        return {"success": False, "data": {}, "error": f"Database error: {e}"}
-    finally:
+    def _execute_validation():
+        conn = get_db_connection()
         try:
-            cursor.close()
-        except:
-            pass
-        try:
-            conn.close()
-        except:
-            pass
+            cursor = conn.cursor(dictionary=True)
+            query = "SELECT importe, used, codreser, dateused FROM compraclick WHERE autorizacion = %s"
+            
+            cursor.execute(query, (authorization_number,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return {
+                    "success": False, 
+                    "data": {"is_valid": False}, 
+                    "error": "Authorization code not found",
+                    "customer_message": "No hemos podido encontrar el número de autorización proporcionado. Por favor, revise su correo electrónico para encontrar el comprobante de pago de CompraClick que contiene el número de autorización y envíenoslo, ya que necesitamos ese número para verificar su pago y proceder con su reserva. Este comprobante se enví de parte del Banco de América Central como un archivo adjunto en PDF. 📧"
+                }
+
+            importe = float(result['importe'])
+            used = float(result['used'])
+            remaining_amount = importe - used
+
+            is_valid = remaining_amount >= (booking_total * 0.5)
+
+            if is_valid:
+                logger.info(f"Successfully validated CompraClick payment '{authorization_number}'. Remaining balance: {remaining_amount}")
+                data = {
+                    "authorization_code": authorization_number,
+                    "remaining_amount": remaining_amount,
+                    "booking_total": booking_total,
+                    "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
+                    "is_valid": is_valid
+                }
+                return {"success": True, "data": data, "error": ""}
+            else:
+                logger.warning(f"CompraClick payment '{authorization_number}' validation failed. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
+                
+                codreser = result.get('codreser', '') or 'N/A'
+                dateused = result.get('dateused', '') or 'N/A'
+                original_amount = importe
+                
+                customer_message = (
+                    f"Hemos encontrado su pago con autorización {authorization_number} por ${original_amount:.2f}, "
+                    f"pero este pago ya ha sido utilizado previamente. "
+                    f"\n\n📋 **Detalles del uso anterior:**\n"
+                    f"• Reserva(s): {codreser}\n"
+                    f"• Fecha de uso: {dateused}\n"
+                    f"• Saldo restante: ${remaining_amount:.2f}\n\n"
+                    f"Si necesita realizar una nueva reserva, puedo generar un nuevo enlace de pago CompraClick. "
+                    f"¿Le gustaría que proceda con esto? 💳"
+                )
+                
+                data = {
+                    "authorization_code": authorization_number,
+                    "remaining_amount": remaining_amount,
+                    "original_amount": original_amount,
+                    "booking_total": booking_total,
+                    "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
+                    "is_valid": is_valid,
+                    "previous_bookings": codreser,
+                    "date_used": dateused
+                }
+                
+                return {
+                    "success": False, 
+                    "data": data, 
+                    "error": "Payment already used",
+                    "customer_message": customer_message
+                }
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_validation, f"validate_compraclick_payment({authorization_number})")
 
 
 async def validate_compraclick_payment_fallback(
@@ -525,6 +481,7 @@ async def validate_compraclick_payment_fallback(
     """
     Fallback validation for CompraClick payments when authorization code is not available.
     Validates by matching credit card last 4 digits, amount, and payment date.
+    Uses infinite retry for database operations.
     
     Args:
         card_last_four: Last 4 digits of the credit card used for payment
@@ -540,251 +497,231 @@ async def validate_compraclick_payment_fallback(
     
     logger.info(f"Starting fallback validation - Card ending: {card_last_four}, Amount: {charged_amount}, Date: {payment_date}")
     
-    conn = get_db_connection()
-    if not conn:
-        return {"success": False, "data": {}, "error": "Database connection failed"}
+    # --- INPUT VALIDATION PHASE (no retry - user input errors) ---
+    # Parse the customer-provided date flexibly
+    parsed_date = None
+    payment_date_lower = payment_date.lower().strip()
     
-    cursor = conn.cursor(dictionary=True)
+    if payment_date_lower in ['hoy', 'today']:
+        parsed_date = datetime.now()
+    elif payment_date_lower in ['ayer', 'yesterday']:
+        parsed_date = datetime.now() - timedelta(days=1)
+    elif payment_date_lower in ['anteayer', 'antier', 'before yesterday', 'day before yesterday']:
+        parsed_date = datetime.now() - timedelta(days=2)
+    else:
+        date_formats = [
+            '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
+            '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',
+            '%Y-%m-%d', '%Y/%m/%d',
+            '%d/%m', '%d-%m',
+            '%m/%d', '%m-%d',
+            '%d de %B', '%d %B',
+            '%B %d', '%B %d, %Y',
+            '%d de %B de %Y', '%d de %B del %Y'
+        ]
+        
+        for fmt in date_formats:
+            try:
+                if fmt in ['%d/%m', '%d-%m', '%m/%d', '%m-%d']:
+                    parsed_date = datetime.strptime(f"{payment_date}/{datetime.now().year}", f"{fmt}/%Y")
+                else:
+                    parsed_date = datetime.strptime(payment_date, fmt)
+                break
+            except:
+                continue
     
-    try:
-        # Parse the customer-provided date flexibly
-        # Common formats: "today", "yesterday", "12/25", "25-12-2024", "December 25", etc.
-        parsed_date = None
-        payment_date_lower = payment_date.lower().strip()
-        
-        if payment_date_lower in ['hoy', 'today']:
-            parsed_date = datetime.now()
-        elif payment_date_lower in ['ayer', 'yesterday']:
-            parsed_date = datetime.now() - timedelta(days=1)
-        elif payment_date_lower in ['anteayer', 'antier', 'before yesterday', 'day before yesterday']:
-            parsed_date = datetime.now() - timedelta(days=2)
-        else:
-            # Try various date formats
-            date_formats = [
-                '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',  # DD/MM/YYYY variants
-                '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',  # MM/DD/YYYY variants
-                '%Y-%m-%d', '%Y/%m/%d',              # ISO format variants
-                '%d/%m', '%d-%m',                     # DD/MM (assume current year)
-                '%m/%d', '%m-%d',                     # MM/DD (assume current year)
-                '%d de %B', '%d %B',                  # Spanish/English month names
-                '%B %d', '%B %d, %Y',                 # English format
-                '%d de %B de %Y', '%d de %B del %Y'  # Spanish full format
-            ]
-            
-            for fmt in date_formats:
-                try:
-                    if fmt in ['%d/%m', '%d-%m', '%m/%d', '%m-%d']:
-                        # For formats without year, add current year
-                        parsed_date = datetime.strptime(f"{payment_date}/{datetime.now().year}", f"{fmt}/%Y")
-                    else:
-                        parsed_date = datetime.strptime(payment_date, fmt)
-                    break
-                except:
-                    continue
-        
-        if not parsed_date:
-            logger.error(f"Could not parse payment date: {payment_date}")
-            return {
-                "success": False,
-                "data": {"is_valid": False},
-                "error": "Could not parse payment date",
-                "customer_message": f"No pude entender la fecha '{payment_date}'. Por favor, proporcione la fecha en formato DD/MM/AAAA (por ejemplo: 25/12/2024) o use palabras como 'hoy', 'ayer'. 📅"
-            }
-        
-        # Create date range for the query (entire day)
-        date_start = parsed_date.replace(hour=0, minute=0, second=0)
-        date_end = parsed_date.replace(hour=23, minute=59, second=59)
-        
-        # Ensure card_last_four is exactly 4 digits
-        card_last_four = re.sub(r'\D', '', str(card_last_four))[-4:]
-        if len(card_last_four) != 4:
-            return {
-                "success": False,
-                "data": {"is_valid": False},
-                "error": "Invalid card digits",
-                "customer_message": "Por favor, proporcione exactamente los últimos 4 dígitos de su tarjeta de crédito. 💳"
-            }
-        
-        # Query to find matching payment
-        # documento column ends with the card last 4 digits
-        # importe matches the charged amount (with small tolerance for rounding)
-        # date falls within the payment date
-        query = """
-            SELECT autorizacion, documento, importe, used, codreser, dateused, date
-            FROM compraclick 
-            WHERE documento LIKE %s
-            AND ABS(importe - %s) < 0.01
-            AND date BETWEEN %s AND %s
-            ORDER BY date DESC
-            LIMIT 1
-        """
-        
-        cursor.execute(query, (
-            f"%{card_last_four}",
-            charged_amount,
-            date_start.strftime('%Y-%m-%d %H:%M:%S'),
-            date_end.strftime('%Y-%m-%d %H:%M:%S')
-        ))
-        
-        result = cursor.fetchone()
-        
-        if not result:
-            logger.warning(f"No payment found matching: Card ending {card_last_four}, Amount ${charged_amount}, Date {parsed_date.strftime('%Y-%m-%d')}")
-            
-            # Try a broader search to provide helpful feedback
-            broader_query = """
-                SELECT COUNT(*) as count, 
-                       SUM(CASE WHEN documento LIKE %s THEN 1 ELSE 0 END) as card_matches,
-                       SUM(CASE WHEN ABS(importe - %s) < 0.01 THEN 1 ELSE 0 END) as amount_matches,
-                       SUM(CASE WHEN date BETWEEN %s AND %s THEN 1 ELSE 0 END) as date_matches
-                FROM compraclick
-                WHERE date BETWEEN %s AND %s
-            """
-            
-            date_range_start = (parsed_date - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
-            date_range_end = (parsed_date + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
-            
-            cursor.execute(broader_query, (
-                f"%{card_last_four}",
-                charged_amount,
-                date_start.strftime('%Y-%m-%d %H:%M:%S'),
-                date_end.strftime('%Y-%m-%d %H:%M:%S'),
-                date_range_start,
-                date_range_end
-            ))
-            
-            debug_info = cursor.fetchone()
-            
-            customer_message = (
-                f"No encontramos un pago que coincida con los datos proporcionados:\n\n"
-                f"💳 **Tarjeta terminada en:** {card_last_four}\n"
-                f"💰 **Monto:** ${charged_amount:.2f}\n"
-                f"📅 **Fecha:** {parsed_date.strftime('%d/%m/%Y')}\n\n"
-            )
-            
-            if debug_info:
-                if debug_info['card_matches'] == 0:
-                    customer_message += "❌ No encontramos pagos con esos últimos 4 dígitos de tarjeta.\n"
-                if debug_info['amount_matches'] == 0:
-                    customer_message += "❌ No encontramos pagos por ese monto exacto.\n"
-                if debug_info['date_matches'] == 0:
-                    customer_message += "❌ No encontramos pagos en esa fecha.\n"
-            
-            customer_message += (
-                "\nPor favor verifique:\n"
-                "1️⃣ Que los últimos 4 dígitos sean correctos\n"
-                "2️⃣ Que el monto sea el total cargado a su tarjeta\n"
-                "3️⃣ Que la fecha sea cuando realizó el pago\n\n"
-                "Si los datos son correctos, es posible que el banco aún no haya reportado su transacción. "
-                "Intentaremos sincronizar nuevamente en unos minutos. ⏳"
-            )
-            
-            return {
-                "success": False,
-                "data": {"is_valid": False},
-                "error": "Payment not found with provided details",
-                "customer_message": customer_message
-            }
-        
-        # Payment found - validate balance
-        autorizacion = result['autorizacion']
-        importe = float(result['importe'])
-        used = float(result['used'])
-        remaining_amount = importe - used
-        
-        # Payment is valid if the remaining balance can cover at least 50% of the booking
-        is_valid = remaining_amount >= (booking_total * 0.5)
-        
-        if is_valid:
-            logger.info(f"Successfully validated payment via fallback - Auth: {autorizacion}, Remaining: ${remaining_amount:.2f}")
-            
-            data = {
-                "authorization_code": autorizacion,
-                "remaining_amount": remaining_amount,
-                "booking_total": booking_total,
-                "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
-                "is_valid": is_valid,
-                "validation_method": "fallback",
-                "matched_criteria": {
-                    "card_last_four": card_last_four,
-                    "amount": charged_amount,
-                    "date": parsed_date.strftime('%Y-%m-%d')
-                }
-            }
-            
-            customer_message = (
-                f"✅ **¡Pago encontrado y validado exitosamente!**\n\n"
-                f"📋 **Detalles del pago:**\n"
-                f"• Autorización: {autorizacion}\n"
-                f"• Monto original: ${importe:.2f}\n"
-                f"• Saldo disponible: ${remaining_amount:.2f}\n"
-                f"• Cobertura del booking: {data['coverage_percentage']:.1f}%\n\n"
-                f"Procederemos con su reserva ahora. 🎉"
-            )
-            
-            return {
-                "success": True,
-                "data": data,
-                "error": "",
-                "customer_message": customer_message
-            }
-        else:
-            # Payment found but insufficient balance
-            codreser = result.get('codreser', '') or 'N/A'
-            dateused = result.get('dateused', '') or 'N/A'
-            
-            customer_message = (
-                f"Encontramos su pago (Autorización: {autorizacion}) por ${importe:.2f}, "
-                f"pero ya ha sido utilizado previamente.\n\n"
-                f"📋 **Detalles del uso anterior:**\n"
-                f"• Reserva(s): {codreser}\n"
-                f"• Fecha de uso: {dateused}\n"
-                f"• Saldo restante: ${remaining_amount:.2f}\n\n"
-                f"El saldo restante no es suficiente para cubrir su nueva reserva. "
-                f"¿Le gustaría que genere un nuevo enlace de pago CompraClick? 💳"
-            )
-            
-            data = {
-                "authorization_code": autorizacion,
-                "remaining_amount": remaining_amount,
-                "original_amount": importe,
-                "booking_total": booking_total,
-                "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
-                "is_valid": is_valid,
-                "previous_bookings": codreser,
-                "date_used": dateused,
-                "validation_method": "fallback"
-            }
-            
-            return {
-                "success": False,
-                "data": data,
-                "error": "Insufficient balance",
-                "customer_message": customer_message
-            }
-            
-    except Exception as e:
-        logger.exception(f"Error in fallback validation: {e}")
+    if not parsed_date:
+        logger.error(f"Could not parse payment date: {payment_date}")
         return {
             "success": False,
-            "data": {},
-            "error": f"Database error: {e}",
-            "customer_message": "Ocurrió un error al validar su pago. Por favor, intente nuevamente en unos momentos. 🔄"
+            "data": {"is_valid": False},
+            "error": "Could not parse payment date",
+            "customer_message": f"No pude entender la fecha '{payment_date}'. Por favor, proporcione la fecha en formato DD/MM/AAAA (por ejemplo: 25/12/2024) o use palabras como 'hoy', 'ayer'. 📅"
         }
-    finally:
+    
+    date_start = parsed_date.replace(hour=0, minute=0, second=0)
+    date_end = parsed_date.replace(hour=23, minute=59, second=59)
+    
+    # Ensure card_last_four is exactly 4 digits
+    card_last_four_clean = re.sub(r'\D', '', str(card_last_four))[-4:]
+    if len(card_last_four_clean) != 4:
+        return {
+            "success": False,
+            "data": {"is_valid": False},
+            "error": "Invalid card digits",
+            "customer_message": "Por favor, proporcione exactamente los últimos 4 dígitos de su tarjeta de crédito. 💳"
+        }
+    
+    # --- DATABASE QUERY PHASE (with infinite retry) ---
+    def _execute_fallback_validation():
+        conn = get_db_connection()
         try:
-            cursor.close()
-        except:
-            pass
-        try:
-            conn.close()
-        except:
-            pass
+            cursor = conn.cursor(dictionary=True)
+            
+            query = """
+                SELECT autorizacion, documento, importe, used, codreser, dateused, date
+                FROM compraclick 
+                WHERE documento LIKE %s
+                AND ABS(importe - %s) < 0.01
+                AND date BETWEEN %s AND %s
+                ORDER BY date DESC
+                LIMIT 1
+            """
+            
+            cursor.execute(query, (
+                f"%{card_last_four_clean}",
+                charged_amount,
+                date_start.strftime('%Y-%m-%d %H:%M:%S'),
+                date_end.strftime('%Y-%m-%d %H:%M:%S')
+            ))
+            
+            result = cursor.fetchone()
+            
+            if not result:
+                logger.warning(f"No payment found matching: Card ending {card_last_four_clean}, Amount ${charged_amount}, Date {parsed_date.strftime('%Y-%m-%d')}")
+                
+                broader_query = """
+                    SELECT COUNT(*) as count, 
+                           SUM(CASE WHEN documento LIKE %s THEN 1 ELSE 0 END) as card_matches,
+                           SUM(CASE WHEN ABS(importe - %s) < 0.01 THEN 1 ELSE 0 END) as amount_matches,
+                           SUM(CASE WHEN date BETWEEN %s AND %s THEN 1 ELSE 0 END) as date_matches
+                    FROM compraclick
+                    WHERE date BETWEEN %s AND %s
+                """
+                
+                date_range_start = (parsed_date - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+                date_range_end = (parsed_date + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+                
+                cursor.execute(broader_query, (
+                    f"%{card_last_four_clean}",
+                    charged_amount,
+                    date_start.strftime('%Y-%m-%d %H:%M:%S'),
+                    date_end.strftime('%Y-%m-%d %H:%M:%S'),
+                    date_range_start,
+                    date_range_end
+                ))
+                
+                debug_info = cursor.fetchone()
+                
+                customer_message = (
+                    f"No encontramos un pago que coincida con los datos proporcionados:\n\n"
+                    f"💳 **Tarjeta terminada en:** {card_last_four_clean}\n"
+                    f"💰 **Monto:** ${charged_amount:.2f}\n"
+                    f"📅 **Fecha:** {parsed_date.strftime('%d/%m/%Y')}\n\n"
+                )
+                
+                if debug_info:
+                    if debug_info['card_matches'] == 0:
+                        customer_message += "❌ No encontramos pagos con esos últimos 4 dígitos de tarjeta.\n"
+                    if debug_info['amount_matches'] == 0:
+                        customer_message += "❌ No encontramos pagos por ese monto exacto.\n"
+                    if debug_info['date_matches'] == 0:
+                        customer_message += "❌ No encontramos pagos en esa fecha.\n"
+                
+                customer_message += (
+                    "\nPor favor verifique:\n"
+                    "1️⃣ Que los últimos 4 dígitos sean correctos\n"
+                    "2️⃣ Que el monto sea el total cargado a su tarjeta\n"
+                    "3️⃣ Que la fecha sea cuando realizó el pago\n\n"
+                    "Si los datos son correctos, es posible que el banco aún no haya reportado su transacción. "
+                    "Intentaremos sincronizar nuevamente en unos minutos. ⏳"
+                )
+                
+                return {
+                    "success": False,
+                    "data": {"is_valid": False},
+                    "error": "Payment not found with provided details",
+                    "customer_message": customer_message
+                }
+            
+            autorizacion = result['autorizacion']
+            importe = float(result['importe'])
+            used = float(result['used'])
+            remaining_amount = importe - used
+            
+            is_valid = remaining_amount >= (booking_total * 0.5)
+            
+            if is_valid:
+                logger.info(f"Successfully validated payment via fallback - Auth: {autorizacion}, Remaining: ${remaining_amount:.2f}")
+                
+                data = {
+                    "authorization_code": autorizacion,
+                    "remaining_amount": remaining_amount,
+                    "booking_total": booking_total,
+                    "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
+                    "is_valid": is_valid,
+                    "validation_method": "fallback",
+                    "matched_criteria": {
+                        "card_last_four": card_last_four_clean,
+                        "amount": charged_amount,
+                        "date": parsed_date.strftime('%Y-%m-%d')
+                    }
+                }
+                
+                customer_message = (
+                    f"✅ **¡Pago encontrado y validado exitosamente!**\n\n"
+                    f"📋 **Detalles del pago:**\n"
+                    f"• Autorización: {autorizacion}\n"
+                    f"• Monto original: ${importe:.2f}\n"
+                    f"• Saldo disponible: ${remaining_amount:.2f}\n"
+                    f"• Cobertura del booking: {data['coverage_percentage']:.1f}%\n\n"
+                    f"Procederemos con su reserva ahora. 🎉"
+                )
+                
+                return {
+                    "success": True,
+                    "data": data,
+                    "error": "",
+                    "customer_message": customer_message
+                }
+            else:
+                codreser = result.get('codreser', '') or 'N/A'
+                dateused = result.get('dateused', '') or 'N/A'
+                
+                customer_message = (
+                    f"Encontramos su pago (Autorización: {autorizacion}) por ${importe:.2f}, "
+                    f"pero ya ha sido utilizado previamente.\n\n"
+                    f"📋 **Detalles del uso anterior:**\n"
+                    f"• Reserva(s): {codreser}\n"
+                    f"• Fecha de uso: {dateused}\n"
+                    f"• Saldo restante: ${remaining_amount:.2f}\n\n"
+                    f"El saldo restante no es suficiente para cubrir su nueva reserva. "
+                    f"¿Le gustaría que genere un nuevo enlace de pago CompraClick? 💳"
+                )
+                
+                data = {
+                    "authorization_code": autorizacion,
+                    "remaining_amount": remaining_amount,
+                    "original_amount": importe,
+                    "booking_total": booking_total,
+                    "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
+                    "is_valid": is_valid,
+                    "previous_bookings": codreser,
+                    "date_used": dateused,
+                    "validation_method": "fallback"
+                }
+                
+                return {
+                    "success": False,
+                    "data": data,
+                    "error": "Insufficient balance",
+                    "customer_message": customer_message
+                }
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_fallback_validation, f"validate_compraclick_payment_fallback({card_last_four_clean})")
 
 
 async def reserve_compraclick_payment(authorization_number: str, booking_total: float) -> dict:
     """
     Reserves a CompraClick payment amount by updating the 'used' column.
+    Uses infinite retry for database operations.
     This should only be called after successful booking validation and just before the booking HTTP call.
 
     Args:
@@ -795,51 +732,43 @@ async def reserve_compraclick_payment(authorization_number: str, booking_total: 
         A dictionary with the reservation result
     """
     logger.info(f"Attempting to reserve {booking_total} from CompraClick auth '{authorization_number}'")
-    conn = get_db_connection()
-    if not conn:
-        return {"success": False, "error": "Database connection failed"}
     
-    cursor = conn.cursor(dictionary=True)
-    # Lock the row for update to prevent race conditions
-    query = "SELECT importe, used FROM compraclick WHERE autorizacion = %s FOR UPDATE"
+    def _execute_reservation():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            query = "SELECT importe, used FROM compraclick WHERE autorizacion = %s FOR UPDATE"
+            
+            cursor.execute(query, (authorization_number,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return {"success": False, "error": "Authorization code not found"}
+
+            importe = float(result['importe'])
+            used = float(result['used'])
+            remaining_amount = importe - used
+
+            if remaining_amount < (booking_total * 0.5):
+                logger.warning(f"CompraClick payment '{authorization_number}' insufficient balance. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
+                return {"success": False, "error": f"Fondos insuficientes. Saldo disponible: {remaining_amount:.2f}, se requiere: {booking_total * 0.5:.2f}"}
+
+            new_used_amount = used + booking_total
+            update_query = "UPDATE compraclick SET used = %s WHERE autorizacion = %s"
+            cursor.execute(update_query, (new_used_amount, authorization_number))
+            conn.commit()
+            
+            logger.info(f"Successfully reserved {booking_total} from CompraClick auth '{authorization_number}'. New used amount: {new_used_amount}")
+            return {"success": True, "message": f"Cantidad {booking_total:.2f} reservada exitosamente"}
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
     
-    try:
-        cursor.execute(query, (authorization_number,))
-        result = cursor.fetchone()
-        
-        if not result:
-            return {"success": False, "error": "Authorization code not found"}
-
-        importe = float(result['importe'])
-        used = float(result['used'])
-        remaining_amount = importe - used
-
-        # Check if payment is still valid (remaining balance can cover at least 50% of booking)
-        if remaining_amount < (booking_total * 0.5):
-            logger.warning(f"CompraClick payment '{authorization_number}' insufficient balance. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
-            return {"success": False, "error": f"Fondos insuficientes. Saldo disponible: {remaining_amount:.2f}, se requiere: {booking_total * 0.5:.2f}"}
-
-        # Add the booking total to the 'used' amount for this transaction
-        new_used_amount = used + booking_total
-        update_query = "UPDATE compraclick SET used = %s WHERE autorizacion = %s"
-        cursor.execute(update_query, (new_used_amount, authorization_number))
-        conn.commit()
-        
-        logger.info(f"Successfully reserved {booking_total} from CompraClick auth '{authorization_number}'. New used amount: {new_used_amount}")
-        return {"success": True, "message": f"Cantidad {booking_total:.2f} reservada exitosamente"}
-
-    except Exception as e:
-        logger.exception(f"Error reserving CompraClick payment: {e}")
-        return {"success": False, "error": f"Database error: {e}"}
-    finally:
-        try:
-            cursor.close()
-        except:
-            pass
-        try:
-            conn.close()
-        except:
-            pass
+    return execute_with_retry(_execute_reservation, f"reserve_compraclick_payment({authorization_number})")
 
 
 async def create_compraclick_link(customer_name: str, payment_amount: float, calculation_explanation: str, payment_percentage: str = "100%") -> dict:

@@ -2,7 +2,7 @@
 Payment Proof Analysis Tool
 
 This module provides functionality to analyze payment receipts (images/PDFs)
-using OpenAI's o4-mini multimodal model. It can identify CompraClick payment
+using OpenAI's gpt-5-mini multimodal model. It can identify CompraClick payment
 receipts or bank transfers and extract key information.
 
 Usage:
@@ -360,8 +360,9 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
 
         # Call OpenAI API using Responses API
         # Use Chat Completions API (supports images properly)
+        # Using gpt-5-mini for better OCR accuracy on payment receipts
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=messages,
             response_format={"type": "json_object"},
             max_tokens=2048  # Increased tokens for the larger response format

@@ -20,7 +20,7 @@ from typing import Dict
 from playwright.async_api import async_playwright, Page
 import mysql.connector
 from mysql.connector import Error as MySQLError
-from .database_client import get_db_connection
+from .database_client import get_db_connection, execute_with_retry
 from .wati_client import update_chat_status, send_wati_message
 from dotenv import load_dotenv
 
@@ -519,89 +519,99 @@ async def sync_bank_transfers() -> dict:
                 # Continue the infinite retry loop
 
 async def process_csv_and_insert_to_db(file_path: str) -> dict:
-    """Processes the downloaded CSV file and inserts data into the bac table."""
-    conn = get_db_connection()
-    if not conn:
-        raise Exception("Database connection failed")
-    cursor = conn.cursor()
-
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS bac (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        date VARCHAR(255),
-        reference VARCHAR(255),
-        code VARCHAR(255),
-        description VARCHAR(255),
-        debit VARCHAR(255),
-        credit VARCHAR(255),
-        balance VARCHAR(255),
-        used DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_transaction (date, reference, code, debit, credit)
-    )
     """
-    cursor.execute(create_table_query)
-    conn.commit()
-    logger.info("'bac' table is ready.")
+    Processes the downloaded CSV file and inserts data into the bac table.
+    Uses infinite retry for database operations.
+    """
+    def _execute_csv_processing():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
 
-    rows_inserted = 0
-    rows_skipped = 0
-    header_found = False
-    headers = ['date', 'reference', 'code', 'description', 'debit', 'credit', 'balance']
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS bac (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                date VARCHAR(255),
+                reference VARCHAR(255),
+                code VARCHAR(255),
+                description VARCHAR(255),
+                debit VARCHAR(255),
+                credit VARCHAR(255),
+                balance VARCHAR(255),
+                used DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_transaction (date, reference, code, debit, credit)
+            )
+            """
+            cursor.execute(create_table_query)
+            conn.commit()
+            logger.info("'bac' table is ready.")
 
-    with open(file_path, mode='r', encoding='latin-1') as csvfile:
-        reader = csv.reader(csvfile)
-        for row_values in reader:
-            if not header_found and any(cell and 'Fecha de Transacci' in cell for cell in row_values):
-                header_found = True
-                logger.info('CSV header found.')
-                continue
-            
-            if header_found:
-                if not (row_values and row_values[0]) or any('Resumen de Estado Bancario' in cell for cell in row_values if cell):
-                    logger.info('Reached end of relevant data in CSV.')
-                    break
-                
-                if len(row_values) == len(headers):
-                    row_data = {h: v.strip() if v else '' for h, v in zip(headers, row_values)}
-                    
-                    # Exactly match JavaScript duplicate detection logic
-                    check_query = """SELECT * FROM bac WHERE date = %s AND reference = %s AND code = %s AND debit = %s AND credit = %s"""
-                    cursor.execute(check_query, (row_data['date'], row_data['reference'], row_data['code'], row_data['debit'], row_data['credit']))
-                    
-                    if cursor.fetchone():
-                        rows_skipped += 1
+            rows_inserted = 0
+            rows_skipped = 0
+            header_found = False
+            headers = ['date', 'reference', 'code', 'description', 'debit', 'credit', 'balance']
+
+            with open(file_path, mode='r', encoding='latin-1') as csvfile:
+                reader = csv.reader(csvfile)
+                for row_values in reader:
+                    if not header_found and any(cell and 'Fecha de Transacci' in cell for cell in row_values):
+                        header_found = True
+                        logger.info('CSV header found.')
                         continue
+                    
+                    if header_found:
+                        if not (row_values and row_values[0]) or any('Resumen de Estado Bancario' in cell for cell in row_values if cell):
+                            logger.info('Reached end of relevant data in CSV.')
+                            break
+                        
+                        if len(row_values) == len(headers):
+                            row_data = {h: v.strip() if v else '' for h, v in zip(headers, row_values)}
+                            
+                            # Exactly match JavaScript duplicate detection logic
+                            check_query = """SELECT * FROM bac WHERE date = %s AND reference = %s AND code = %s AND debit = %s AND credit = %s"""
+                            cursor.execute(check_query, (row_data['date'], row_data['reference'], row_data['code'], row_data['debit'], row_data['credit']))
+                            
+                            if cursor.fetchone():
+                                rows_skipped += 1
+                                continue
 
-                    # Insert new record if no duplicate was found
-                    try:
-                        insert_query = """INSERT INTO bac (date, reference, code, description, debit, credit, balance, used) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
-                        cursor.execute(insert_query, (
-                            row_data['date'], 
-                            row_data['reference'], 
-                            row_data['code'], 
-                            row_data['description'], 
-                            row_data['debit'], 
-                            row_data['credit'], 
-                            row_data['balance'],
-                            0.00
-                        ))
-                        rows_inserted += 1
-                    except Exception as e:
-                        logger.error(f"Error inserting row: {row_data}. Error: {e}")
-                        rows_skipped += 1
+                            # Insert new record if no duplicate was found
+                            try:
+                                insert_query = """INSERT INTO bac (date, reference, code, description, debit, credit, balance, used) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+                                cursor.execute(insert_query, (
+                                    row_data['date'], 
+                                    row_data['reference'], 
+                                    row_data['code'], 
+                                    row_data['description'], 
+                                    row_data['debit'], 
+                                    row_data['credit'], 
+                                    row_data['balance'],
+                                    0.00
+                                ))
+                                rows_inserted += 1
+                            except Exception as e:
+                                logger.error(f"Error inserting row: {row_data}. Error: {e}")
+                                rows_skipped += 1
 
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    logger.info(f"Rows inserted: {rows_inserted}, Rows skipped: {rows_skipped}")
-    return {"rows_inserted": rows_inserted, "rows_skipped": rows_skipped}
+            conn.commit()
+            logger.info(f"Rows inserted: {rows_inserted}, Rows skipped: {rows_skipped}")
+            return {"rows_inserted": rows_inserted, "rows_skipped": rows_skipped}
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_csv_processing, f"process_csv_and_insert_to_db({file_path})")
 
 def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: float) -> dict:
     """
     Validates a bank transfer by finding a deposit matching the slip details
     and checking if it has enough balance to cover the booking amount.
+    Uses infinite retry for database operations.
     
     IMPORTANT: This function only validates - it does NOT update the database.
     Use reserve_bank_transfer() to actually reserve the amount after booking succeeds.
@@ -614,70 +624,79 @@ def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: f
     Returns:
         A dictionary with the validation result including transfer_id for reservation.
     """
-    logger.info(f"Attempting to validate booking of {booking_amount} using slip for {slip_amount} on {slip_date}")
-    db_connection = None
+    # 🚨 VALIDATION: Check for illogical future dates
     try:
-        db_connection = get_db_connection()
-        cursor = db_connection.cursor(dictionary=True)
+        from datetime import datetime as dt
+        slip_date_obj = dt.strptime(slip_date, "%Y-%m-%d")
+        today = dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if slip_date_obj > today:
+            logger.error(f"ILLOGICAL DATE: slip_date {slip_date} is in the future! OCR likely misread the year.")
+            return {
+                "success": False, 
+                "error": "future_date",
+                "message": f"🚨 FECHA ILÓGICA: La fecha del comprobante ({slip_date}) está en el futuro. Esto es imposible para una transferencia ya realizada. Por favor: (1) Re-analice el comprobante con analyze_payment_proof, o (2) Pregunte al cliente la fecha REAL de la transferencia."
+            }
+    except ValueError as e:
+        logger.warning(f"Could not parse slip_date {slip_date}: {e}")
+    
+    logger.info(f"Attempting to validate booking of {booking_amount} using slip for {slip_amount} on {slip_date}")
+    
+    def _execute_validation():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
 
-        # Find an available transfer matching the slip amount and date.
-        query = """
-            SELECT id, credit, used FROM bac 
-            WHERE credit = %s AND STR_TO_DATE(date, '%d/%m/%Y') = %s AND used < credit
-            LIMIT 1
-        """
-        cursor.execute(query, (slip_amount, slip_date))
-        transfer_record = cursor.fetchone()
+            # Find an available transfer matching the slip amount and date.
+            query = """
+                SELECT id, credit, used FROM bac 
+                WHERE credit = %s AND STR_TO_DATE(date, '%d/%m/%Y') = %s AND used < credit
+                LIMIT 1
+            """
+            cursor.execute(query, (slip_amount, slip_date))
+            transfer_record = cursor.fetchone()
 
-        if not transfer_record:
-            logger.warning(f"Validation failed: No unused transfer found for amount {slip_amount} on {slip_date}.")
-            return {"success": False, "message": f"No se encontró una transferencia bancaria disponible por {slip_amount:.2f} en la fecha {slip_date}."}
+            if not transfer_record:
+                logger.warning(f"Validation failed: No unused transfer found for amount {slip_amount} on {slip_date}.")
+                return {"success": False, "message": f"No se encontró una transferencia bancaria disponible por {slip_amount:.2f} en la fecha {slip_date}."}
 
-        record_id = transfer_record['id']
-        credit_amount = float(transfer_record['credit'])
-        used_amount = float(transfer_record['used'])
-        available_balance = credit_amount - used_amount
+            record_id = transfer_record['id']
+            credit_amount = float(transfer_record['credit'])
+            used_amount = float(transfer_record['used'])
+            available_balance = credit_amount - used_amount
 
-        logger.info(f"Found transfer ID {record_id}: Credit={credit_amount}, Used={used_amount}, Available={available_balance}")
+            logger.info(f"Found transfer ID {record_id}: Credit={credit_amount}, Used={used_amount}, Available={available_balance}")
 
-        # Check if the requested booking amount is valid and available
-        if booking_amount <= 0:
-            return {"success": False, "message": "El monto a validar debe ser mayor que cero."}
+            # Check if the requested booking amount is valid and available
+            if booking_amount <= 0:
+                return {"success": False, "message": "El monto a validar debe ser mayor que cero."}
 
-        if available_balance < booking_amount:
-            logger.warning(f"Validation failed for transfer ID {record_id}: Insufficient balance. Available: {available_balance}, Requested: {booking_amount}")
-            return {"success": False, "message": f"Fondos insuficientes. Saldo disponible: {available_balance:.2f}, se requiere: {booking_amount:.2f}"}
+            if available_balance < booking_amount:
+                logger.warning(f"Validation failed for transfer ID {record_id}: Insufficient balance. Available: {available_balance}, Requested: {booking_amount}")
+                return {"success": False, "message": f"Fondos insuficientes. Saldo disponible: {available_balance:.2f}, se requiere: {booking_amount:.2f}"}
 
-        # Validation successful - return transfer info without updating database
-        logger.info(f"Successfully validated transfer ID {record_id}. Available balance: {available_balance}")
-        return {
-            "success": True, 
-            "message": f"Pago de {booking_amount:.2f} validado exitosamente usando la transferencia del {slip_date}.",
-            "transfer_id": record_id,
-            "available_balance": available_balance
-        }
-
-    except MySQLError as e:
-        logger.exception(f"Database error during bank transfer validation: {e}")
-        return {"success": False, "message": "Error de base de datos durante la validación."}
-    except Exception as e:
-        logger.exception(f"An unexpected error occurred during bank transfer validation: {e}")
-        return {"success": False, "message": "Ocurrió un error inesperado durante la validación."}
-    finally:
-        if db_connection and db_connection.is_connected():
-            try:
-                cursor.close()
-            except:
-                pass
-            try:
-                db_connection.close()
-            except:
-                pass
+            # Validation successful - return transfer info without updating database
+            logger.info(f"Successfully validated transfer ID {record_id}. Available balance: {available_balance}")
+            return {
+                "success": True, 
+                "message": f"Pago de {booking_amount:.2f} validado exitosamente usando la transferencia del {slip_date}.",
+                "transfer_id": record_id,
+                "available_balance": available_balance
+            }
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_validation, f"validate_bank_transfer({slip_date}, {slip_amount}, {booking_amount})")
 
 
 def reserve_bank_transfer(transfer_id: int, booking_amount: float) -> dict:
     """
     Reserves a bank transfer amount by updating the 'used' column.
+    Uses infinite retry for database operations.
     This should only be called after successful booking validation and just before the booking HTTP call.
 
     Args:
@@ -688,49 +707,42 @@ def reserve_bank_transfer(transfer_id: int, booking_amount: float) -> dict:
         A dictionary with the reservation result
     """
     logger.info(f"Attempting to reserve {booking_amount} from transfer ID {transfer_id}")
-    db_connection = None
-    try:
-        db_connection = get_db_connection()
-        cursor = db_connection.cursor(dictionary=True)
+    
+    def _execute_reservation():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
 
-        # First, verify the transfer still has sufficient balance
-        query = "SELECT id, credit, used FROM bac WHERE id = %s"
-        cursor.execute(query, (transfer_id,))
-        transfer_record = cursor.fetchone()
+            # First, verify the transfer still has sufficient balance
+            query = "SELECT id, credit, used FROM bac WHERE id = %s"
+            cursor.execute(query, (transfer_id,))
+            transfer_record = cursor.fetchone()
 
-        if not transfer_record:
-            logger.warning(f"Transfer ID {transfer_id} not found for reservation")
-            return {"success": False, "message": "Transfer record not found"}
+            if not transfer_record:
+                logger.warning(f"Transfer ID {transfer_id} not found for reservation")
+                return {"success": False, "message": "Transfer record not found"}
 
-        credit_amount = float(transfer_record['credit'])
-        used_amount = float(transfer_record['used'])
-        available_balance = credit_amount - used_amount
+            credit_amount = float(transfer_record['credit'])
+            used_amount = float(transfer_record['used'])
+            available_balance = credit_amount - used_amount
 
-        if available_balance < booking_amount:
-            logger.warning(f"Insufficient balance for transfer ID {transfer_id}. Available: {available_balance}, Requested: {booking_amount}")
-            return {"success": False, "message": f"Fondos insuficientes. Saldo disponible: {available_balance:.2f}, se requiere: {booking_amount:.2f}"}
+            if available_balance < booking_amount:
+                logger.warning(f"Insufficient balance for transfer ID {transfer_id}. Available: {available_balance}, Requested: {booking_amount}")
+                return {"success": False, "message": f"Fondos insuficientes. Saldo disponible: {available_balance:.2f}, se requiere: {booking_amount:.2f}"}
 
-        # Update the used amount with the booking_amount
-        update_query = "UPDATE bac SET used = used + %s WHERE id = %s"
-        cursor.execute(update_query, (booking_amount, transfer_id))
-        db_connection.commit()
+            # Update the used amount with the booking_amount
+            update_query = "UPDATE bac SET used = used + %s WHERE id = %s"
+            cursor.execute(update_query, (booking_amount, transfer_id))
+            conn.commit()
 
-        logger.info(f"Successfully reserved {booking_amount} from transfer ID {transfer_id}. New used amount: {used_amount + booking_amount}")
-        return {"success": True, "message": f"Cantidad {booking_amount:.2f} reservada exitosamente"}
-
-    except Error as e:
-        logger.exception(f"Database error during bank transfer reservation: {e}")
-        return {"success": False, "message": "Error de base de datos durante la reserva"}
-    except Exception as e:
-        logger.exception(f"An unexpected error occurred during bank transfer reservation: {e}")
-        return {"success": False, "message": "Ocurrió un error inesperado durante la reserva"}
-    finally:
-        if db_connection and db_connection.is_connected():
-            try:
-                cursor.close()
-            except:
-                pass
-            try:
-                db_connection.close()
-            except:
-                pass
+            logger.info(f"Successfully reserved {booking_amount} from transfer ID {transfer_id}. New used amount: {used_amount + booking_amount}")
+            return {"success": True, "message": f"Cantidad {booking_amount:.2f} reservada exitosamente"}
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_reservation, f"reserve_bank_transfer({transfer_id}, {booking_amount})")

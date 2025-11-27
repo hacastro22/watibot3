@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pytz import timezone
 import holidays
 from typing import Dict, List, Optional, Any
-from .database_client import get_db_connection, get_price_for_date
+from .database_client import get_db_connection, get_price_for_date, execute_with_retry
 from .wati_client import send_wati_message, update_chat_status
 from .bank_transfer_tool import reserve_bank_transfer
 import httpx
@@ -151,26 +151,26 @@ def _normalize_bungalow_type(bungalow_type: str) -> dict:
 
 async def _get_openai_thread_id(wa_id: str) -> Optional[str]:
     """
-    Get OpenAI thread ID for a customer.
+    Get OpenAI thread ID for a customer with infinite retry.
     This function should be implemented based on your database schema.
     """
-    try:
+    def _execute_query():
         conn = get_db_connection()
-        if not conn:
-            return None
-            
-        cursor = conn.cursor()
-        query = "SELECT thread_id FROM customer_threads WHERE wa_id = %s ORDER BY created_at DESC LIMIT 1"
-        cursor.execute(query, (wa_id,))
-        result = cursor.fetchone()
-        
-        return result[0] if result else None
-    except Exception as e:
-        logger.warning(f"Could not get thread_id for {wa_id}: {e}")
-        return None
-    finally:
-        if conn and conn.is_connected():
-            conn.close()
+        try:
+            cursor = conn.cursor()
+            query = "SELECT thread_id FROM customer_threads WHERE wa_id = %s ORDER BY created_at DESC LIMIT 1"
+            cursor.execute(query, (wa_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_query, f"_get_openai_thread_id({wa_id})")
 
 async def _get_full_conversation_context(wa_id: str) -> str:
     """
@@ -1372,43 +1372,41 @@ async def _update_payment_record(
     """
     Internal Chain of Thought: Update payment record with booking reference.
     NEVER expose database operations to customers.
+    Uses infinite retry for database operations.
     """
+    def _execute_update():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            codreser = f"HR{reserva}"
+            dateused = datetime.now(EL_SALVADOR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            
+            if payment_method == "CompraClick" and authorization_number:
+                query = """
+                    UPDATE compraclick 
+                    SET codreser = %s, dateused = %s
+                    WHERE autorizacion = %s
+                """
+                cursor.execute(query, (codreser, dateused, authorization_number))
+            elif payment_method == "Depósito BAC" and transfer_id:
+                query = """
+                    UPDATE bac 
+                    SET codreser = %s, dateused = %s
+                    WHERE id = %s
+                """
+                cursor.execute(query, (codreser, dateused, transfer_id))
+            
+            conn.commit()
+            logger.info(f"Payment record updated: {payment_method}, reserva: {reserva}")
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
     
-    conn = get_db_connection()
-    if not conn:
-        raise Exception("Database connection failed")
-    
-    try:
-        cursor = conn.cursor()
-        codreser = f"HR{reserva}"
-        dateused = datetime.now(EL_SALVADOR_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        
-        if payment_method == "CompraClick" and authorization_number:
-            # Update CompraClick payment record
-            query = """
-                UPDATE compraclick 
-                SET codreser = %s, dateused = %s
-                WHERE autorizacion = %s
-            """
-            cursor.execute(query, (codreser, dateused, authorization_number))
-        elif payment_method == "Depósito BAC" and transfer_id:
-            # Update bank transfer payment record
-            query = """
-                UPDATE bac 
-                SET codreser = %s, dateused = %s
-                WHERE id = %s
-            """
-            cursor.execute(query, (codreser, dateused, transfer_id))
-        
-        conn.commit()
-        logger.info(f"Payment record updated: {payment_method}, reserva: {reserva}")
-        
-    except Exception as e:
-        logger.error(f"Failed to update payment record: {e}")
-        raise
-    finally:
-        if conn and conn.is_connected():
-            conn.close()
+    execute_with_retry(_execute_update, f"_update_payment_record({payment_method}, {reserva})")
 
 
 def _get_no_availability_message(check_in_date: str, check_out_date: str) -> str:
@@ -1438,6 +1436,7 @@ Quedamos a su entera disposición."""
 async def _is_payment_already_used(payment_method: str, authorization_number: str = None, transfer_id: str = None) -> bool:
     """
     Check if a payment has already been used for a booking by checking codereser column.
+    Uses infinite retry for database operations.
     
     Args:
         payment_method: "CompraClick" or "Depósito BAC"
@@ -1448,53 +1447,50 @@ async def _is_payment_already_used(payment_method: str, authorization_number: st
         True if payment already has a booking reference (codereser is not empty)
         False if payment is unused (codereser is NULL/empty)
     """
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Database connection failed for payment usage check")
-        return True  # Err on the side of caution - assume used
-    
-    try:
-        cursor = conn.cursor()
-        
-        if payment_method == "CompraClick" and authorization_number:
-            # Check CompraClick table
-            query = "SELECT codereser FROM compraclick WHERE auth = %s"
-            cursor.execute(query, (authorization_number,))
-            result = cursor.fetchone()
+    def _execute_check():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
             
-            if result:
-                codereser = result[0]
-                is_used = codereser is not None and codereser.strip() != ""
-                logger.info(f"CompraClick payment {authorization_number} usage check: codereser='{codereser}', is_used={is_used}")
-                return is_used
-            else:
-                logger.warning(f"CompraClick payment {authorization_number} not found in database")
-                return True  # Payment not found - assume used
+            if payment_method == "CompraClick" and authorization_number:
+                query = "SELECT codereser FROM compraclick WHERE auth = %s"
+                cursor.execute(query, (authorization_number,))
+                result = cursor.fetchone()
                 
-        elif payment_method == "Depósito BAC" and transfer_id:
-            # Check BAC table
-            query = "SELECT codereser FROM bac WHERE id = %s"
-            cursor.execute(query, (transfer_id,))
-            result = cursor.fetchone()
+                if result:
+                    codereser = result[0]
+                    is_used = codereser is not None and codereser.strip() != ""
+                    logger.info(f"CompraClick payment {authorization_number} usage check: codereser='{codereser}', is_used={is_used}")
+                    return is_used
+                else:
+                    logger.warning(f"CompraClick payment {authorization_number} not found in database")
+                    return True  # Payment not found - assume used
+                    
+            elif payment_method == "Depósito BAC" and transfer_id:
+                query = "SELECT codereser FROM bac WHERE id = %s"
+                cursor.execute(query, (transfer_id,))
+                result = cursor.fetchone()
+                
+                if result:
+                    codereser = result[0]
+                    is_used = codereser is not None and codereser.strip() != ""
+                    logger.info(f"Bank transfer {transfer_id} usage check: codereser='{codereser}', is_used={is_used}")
+                    return is_used
+                else:
+                    logger.warning(f"Bank transfer {transfer_id} not found in database")
+                    return True  # Payment not found - assume used
             
-            if result:
-                codereser = result[0]
-                is_used = codereser is not None and codereser.strip() != ""
-                logger.info(f"Bank transfer {transfer_id} usage check: codereser='{codereser}', is_used={is_used}")
-                return is_used
-            else:
-                logger.warning(f"Bank transfer {transfer_id} not found in database")
-                return True  # Payment not found - assume used
-        
-        logger.warning(f"Invalid payment method or missing identifiers: {payment_method}, auth={authorization_number}, transfer_id={transfer_id}")
-        return True  # Invalid parameters - assume used
-        
-    except Exception as e:
-        logger.error(f"Failed to check payment usage: {e}")
-        return True  # Error - assume used for safety
-    finally:
-        if conn and conn.is_connected():
-            conn.close()
+            logger.warning(f"Invalid payment method or missing identifiers: {payment_method}, auth={authorization_number}, transfer_id={transfer_id}")
+            return True  # Invalid parameters - assume used
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+    
+    return execute_with_retry(_execute_check, f"_is_payment_already_used({payment_method})")
 
 
 def _is_explicit_booking_confirmation(message: str) -> bool:

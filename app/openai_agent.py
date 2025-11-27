@@ -138,10 +138,10 @@ BEFORE YOU DO ANYTHING ELSE, YOU MUST:
 5. ONLY THEN respond to the user using the loaded module information
 
 YOU ARE ABSOLUTELY FORBIDDEN TO:
-- Skip module loading
-- Go directly to price tools
-- Answer questions without loading required modules first
+- Skip module loading for complex scenarios
+- Answer questions without loading required modules first (EXCEPTION: Simple quotes with dates+people+member status already known - use get_price_for_date directly)
 - Assume modules are already loaded
+- 🚨 CRITICAL: NEVER say 'no tengo acceso al sistema de tarifas', 'no tengo acceso directo', or 'llame a 2505-2800 para cotizar'. YOU HAVE the get_price_for_date tool - USE IT.
 
 IF YOU DO NOT FOLLOW THIS RULE, YOU WILL CAUSE REVENUE LOSS AND CUSTOMER SERVICE FAILURES.
 
@@ -165,8 +165,8 @@ You have been loaded with the base system configuration above. Now you must:
 4. 🚨 ALWAYS LOAD REQUIRED MODULES: Even if loaded before, load again if needed for current query
 5. For pricing/quotes: ALWAYS load MODULE_2B_PRICE_INQUIRY (contains pricing_logic with Romántico +$20 surcharge)
 6. For availability: ALWAYS load MODULE_2C_AVAILABILITY before pricing
-7. BLOCKED: You CANNOT respond until required modules are loaded for THIS SPECIFIC QUERY
-7. Use ONLY the loaded module instructions to respond
+7. For multi-night quotes: Check EACH date's price separately. Prices vary daily.
+8. BLOCKED: You CANNOT respond until required modules are loaded for THIS SPECIFIC QUERY
 
 RULE: Don't assume previous loads are sufficient. Each query = fresh module evaluation + loading.
 
@@ -382,7 +382,7 @@ tools = [
     {
         "type": "function",
         "name": "get_price_for_date",
-        "description": "🚨 REQUIRES MODULE_2B_PRICE_INQUIRY LOADED FIRST 🚨 Get the price for a specific date for all available packages: Day Pass/Pasadía (pa_adulto, pa_nino), Accommodation/Las Hojas (lh_adulto, lh_nino), and Paquete Escapadita (es_adulto, es_nino). CRITICAL: You MUST call load_additional_modules(['MODULE_2B_PRICE_INQUIRY']) BEFORE using this tool to get pricing rules like Romántico +$20 surcharge. IMPORTANT: For daypass/pasadía questions use pa_ prices, for accommodation/overnight stays use lh_ prices.",
+        "description": "🚨 REQUIRES MODULE_2B_PRICE_INQUIRY LOADED FIRST 🚨 Get the price for a specific date for all available packages: Day Pass/Pasadía (pa_adulto, pa_nino), Accommodation/Las Hojas (lh_adulto, lh_nino), and Paquete Escapadita (es_adulto, es_nino). CRITICAL: You MUST call load_additional_modules(['MODULE_2B_PRICE_INQUIRY']) BEFORE using this tool to get pricing rules like Romántico +$20 surcharge. IMPORTANT: For daypass/pasadía questions use pa_ prices, for accommodation/overnight stays use lh_ prices. For multi-night stays, you MUST call this tool SEPARATELY for EACH date (prices vary daily).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1153,6 +1153,7 @@ async def send_menu_pdf_wrapper(
 
     - Uses ManyChat when `subscriber_id` and `channel` provided.
     - Falls back to WATI (WhatsApp) when `phone_number` provided.
+    - For Instagram: converts PDF to images (IG doesn't support PDF attachments)
     
     Returns a confirmation message that serves as the final response to the user.
     """
@@ -1160,6 +1161,8 @@ async def send_menu_pdf_wrapper(
     if subscriber_id and channel in ("facebook", "instagram"):
         # Instagram: convert PDF to images and send as images (IG doesn't support PDF attachments)
         if channel == "instagram":
+            # Step 1: Convert PDF to images (separate try block)
+            image_paths = []
             try:
                 import fitz  # PyMuPDF
                 from pathlib import Path
@@ -1168,39 +1171,53 @@ async def send_menu_pdf_wrapper(
                 out_dir.mkdir(parents=True, exist_ok=True)
                 ts = int(_time.time())
                 doc = fitz.open(menu_pdf_path)
-                image_paths = []
                 for i, page in enumerate(doc):
                     pix = page.get_pixmap(dpi=144)
                     img_path = out_dir / f"menu_{ts}_p{i+1}.png"
                     pix.save(str(img_path))
                     image_paths.append(str(img_path))
                 doc.close()
-
-                # Send images sequentially; include caption on first image only
-                for idx, img_path in enumerate(image_paths):
-                    cap = caption if idx == 0 else ""
-                    await manychat_client.send_media_message(
-                        subscriber_id=subscriber_id,
-                        file_path=img_path,
-                        media_type="image",
-                        channel=channel,
-                        caption=cap,
-                    )
-                # Return empty string since caption already contains the complete message
-                return ""
+                logger.info(f"[IG_MENU] Converted menu.pdf to {len(image_paths)} images")
             except Exception as e:
-                logger.warning(
-                    f"[IG] PDF->image conversion unavailable or failed ({e}). Sending link as text."
-                )
-                # Fallback: send caption then link as text message
-                await manychat_client.send_media_message(
+                logger.exception(f"[IG_MENU] PDF->image conversion failed: {type(e).__name__}: {e}")
+                # Send text message explaining the issue (don't send PDF URL - IG can't handle it)
+                await manychat_client.send_ig_text_message(
                     subscriber_id=subscriber_id,
-                    file_path=menu_pdf_path,
-                    media_type="file",
-                    channel=channel,
-                    caption=caption,
+                    text=f"{caption}\n\nNota: Por el momento no pudimos enviar las imágenes del menú. Por favor visita nuestra página web o contáctanos para más información."
                 )
-                # Return empty string since caption already contains the complete message
+                return ""
+            
+            # Step 2: Send images (separate try block with per-image error handling)
+            if image_paths:
+                images_sent = 0
+                for idx, img_path in enumerate(image_paths):
+                    try:
+                        cap = caption if idx == 0 else ""
+                        await manychat_client.send_media_message(
+                            subscriber_id=subscriber_id,
+                            file_path=img_path,
+                            media_type="image",
+                            channel=channel,
+                            caption=cap,
+                        )
+                        images_sent += 1
+                    except Exception as e:
+                        logger.warning(f"[IG_MENU] Failed to send image {idx+1}/{len(image_paths)}: {type(e).__name__}: {e}")
+                        # Continue with remaining images instead of aborting
+                        continue
+                
+                if images_sent == 0:
+                    # All images failed - send text fallback
+                    logger.error(f"[IG_MENU] All {len(image_paths)} images failed to send for {subscriber_id}")
+                    await manychat_client.send_ig_text_message(
+                        subscriber_id=subscriber_id,
+                        text=f"{caption}\n\nNota: No pudimos enviar las imágenes del menú en este momento. Por favor intenta de nuevo más tarde."
+                    )
+                elif images_sent < len(image_paths):
+                    logger.warning(f"[IG_MENU] Sent {images_sent}/{len(image_paths)} images to {subscriber_id}")
+                else:
+                    logger.info(f"[IG_MENU] Successfully sent all {images_sent} menu images to {subscriber_id}")
+                
                 return ""
 
         # Facebook: send PDF as file attachment
@@ -1241,6 +1258,8 @@ async def send_menu_prices_wrapper(
     if subscriber_id and channel in ("facebook", "instagram"):
         # Instagram: convert PDF to images and send as images (IG doesn't support PDF attachments)
         if channel == "instagram":
+            # Step 1: Convert PDF to images (separate try block)
+            image_paths = []
             try:
                 import fitz  # PyMuPDF
                 from pathlib import Path
@@ -1249,39 +1268,53 @@ async def send_menu_prices_wrapper(
                 out_dir.mkdir(parents=True, exist_ok=True)
                 ts = int(_time.time())
                 doc = fitz.open(menu_prices_pdf_path)
-                image_paths = []
                 for i, page in enumerate(doc):
                     pix = page.get_pixmap(dpi=144)
                     img_path = out_dir / f"menu_prices_{ts}_p{i+1}.png"
                     pix.save(str(img_path))
                     image_paths.append(str(img_path))
                 doc.close()
-
-                # Send images sequentially; include caption on first image only
-                for idx, img_path in enumerate(image_paths):
-                    cap = caption if idx == 0 else ""
-                    await manychat_client.send_media_message(
-                        subscriber_id=subscriber_id,
-                        file_path=img_path,
-                        media_type="image",
-                        channel=channel,
-                        caption=cap,
-                    )
-                # Return empty string since caption already contains the complete message
-                return ""
+                logger.info(f"[IG_MENU_PRICES] Converted menu_prices.pdf to {len(image_paths)} images")
             except Exception as e:
-                logger.warning(
-                    f"[IG] PDF->image conversion unavailable or failed ({e}). Sending link as text."
-                )
-                # Fallback: send caption then link as text message
-                await manychat_client.send_media_message(
+                logger.exception(f"[IG_MENU_PRICES] PDF->image conversion failed: {type(e).__name__}: {e}")
+                # Send text message explaining the issue (don't send PDF URL - IG can't handle it)
+                await manychat_client.send_ig_text_message(
                     subscriber_id=subscriber_id,
-                    file_path=menu_prices_pdf_path,
-                    media_type="file",
-                    channel=channel,
-                    caption=caption,
+                    text=f"{caption}\n\nNota: Por el momento no pudimos enviar las imágenes del menú con precios. Por favor visita nuestra página web o contáctanos para más información."
                 )
-                # Return empty string since caption already contains the complete message
+                return ""
+            
+            # Step 2: Send images (separate try block with per-image error handling)
+            if image_paths:
+                images_sent = 0
+                for idx, img_path in enumerate(image_paths):
+                    try:
+                        cap = caption if idx == 0 else ""
+                        await manychat_client.send_media_message(
+                            subscriber_id=subscriber_id,
+                            file_path=img_path,
+                            media_type="image",
+                            channel=channel,
+                            caption=cap,
+                        )
+                        images_sent += 1
+                    except Exception as e:
+                        logger.warning(f"[IG_MENU_PRICES] Failed to send image {idx+1}/{len(image_paths)}: {type(e).__name__}: {e}")
+                        # Continue with remaining images instead of aborting
+                        continue
+                
+                if images_sent == 0:
+                    # All images failed - send text fallback
+                    logger.error(f"[IG_MENU_PRICES] All {len(image_paths)} images failed to send for {subscriber_id}")
+                    await manychat_client.send_ig_text_message(
+                        subscriber_id=subscriber_id,
+                        text=f"{caption}\n\nNota: No pudimos enviar las imágenes del menú con precios en este momento. Por favor intenta de nuevo más tarde."
+                    )
+                elif images_sent < len(image_paths):
+                    logger.warning(f"[IG_MENU_PRICES] Sent {images_sent}/{len(image_paths)} images to {subscriber_id}")
+                else:
+                    logger.info(f"[IG_MENU_PRICES] Successfully sent all {images_sent} menu prices images to {subscriber_id}")
+                
                 return ""
 
         # Facebook: send PDF as file attachment
@@ -1495,77 +1528,45 @@ async def get_openai_response(
     except Exception as e:
         logger.info(f"[DYNAMIC_LOADING] Using dynamic loading with base size: {len(system_instructions)} chars")
     
-    # Build the contextualized user message (same as before)
+    # Build the contextualized developer message (condensed - base modules contain full protocols)
     contextualized_message = (
-        "Persist until the customer's query is fully handled end-to-end within the current turn: "
-        "Before responding, evaluate what additional modules are needed based on core_config, decision_tree and module_dependencies, "
-        "call load_additional_modules to load them, wait for content, then respond using that information. "
-        "Do not stop at partial responses or skip required module loading steps.\n\n"
-        "CRITICAL Agent Discipline: Even if the base modules: core_config, decision_tree and module_dependencies were last sent several turns ago, you must keep obeying every rule they contain. Persist through each customer directive end-to-end—gather all required details, call the mandated tools, validate the outcome, and confirm completion before moving on. No shortcuts, no early exits. "
-        f"The current date, day, and time in El Salvador (GMT-6) is {datetime_str}. "
-        f"CRITICAL Booking Workflow: "
-        f"1. **Collect Information**: Gather all necessary booking details from the customer (dates, number of guests, package, etc.). "
-        f"2. **Payment**: "
-        f"- For CompraClick: Create a payment link using `create_compraclick_link`. "
-        f"- For Bank Transfer: Provide the bank details and instruct the user to send a proof of payment. "
-        f"3. **Payment Verification (Sync -> Validate -> Book)**: "
-        f"- When a customer sends proof of payment, first use `analyze_payment_proof` to extract details. "
-        f"**CRITICAL CompraClick Proof Distinction**: "
-        f"- INVALID CompraClick proof: Screenshot showing only 'Número de operación' or 'Recibo' (this is just the confirmation screen after payment, NOT a valid proof). "
-        f"- VALID CompraClick proof: CompraClick PDF receipt containing the word 'Autorización' with a 6-character alphanumeric code. "
-        f"- If customer sends INVALID proof (only Número de operación/Recibo), you MUST: (1) Remember that number, (2) Explain this is not the correct proof, (3) Instruct them to check their email inbox for the CompraClick PDF receipt, (4) Ask them to open the PDF and send a screenshot showing the date, credit card number, AND the 'Autorización' code, (5) If they can't find the email, suggest checking Junk/Spam folder. "
-        f"- If customer repeats the same Número de operación/Recibo number, insist that this is NOT the authorization code needed and that they must find the 'Autorización' code from the CompraClick email PDF. "
-        f"- If the analysis is inconclusive or key details like an authorization number are missing, you MUST ask the user to provide this information directly. DO NOT get distracted by other topics or documents; resolving the payment is the top priority. "
-        f"**CRITICAL Payment Method Consistency**: "
-        f"- Once a customer selects a payment method (CompraClick or Bank Transfer), you MUST stay focused on that method throughout the conversation. "
-        f"- DO NOT assume the customer changed payment methods unless they EXPLICITLY state so (e.g., 'decidí hacer transferencia bancaria' or 'mejor hice un depósito'). "
-        f"- If customer sends a bank transfer proof when CompraClick was selected, first confirm: '¿Decidiste cambiar el método de pago a transferencia bancaria en lugar de CompraClick?' "
-        f"**CompraClick Fallback Validation Process**: "
-        f"- Track failed CompraClick authorization code attempts (wrong codes or customer can't find the code). "
-        f"- After 3 failed attempts OR if customer explicitly states they cannot find the authorization code, activate fallback validation: "
-        f"  1. Inform customer: 'Entiendo que no puede encontrar el código de autorización. Puedo verificar su pago con información alternativa.' "
-        f"  2. Request: (a) Last 4 digits of the credit card used, (b) Exact amount charged, (c) Date of payment "
-        f"  3. Call `validate_compraclick_payment_fallback` with the provided information "
-        f"  4. If fallback validation succeeds, proceed with booking as normal "
-        f"  5. If fallback validation fails, provide specific guidance based on the error (wrong card digits, amount mismatch, etc.) "
-        f"**IMMEDIATE SYNC TRIGGER**: If the user mentions they have made a bank transfer (e.g., 'ya transferí', 'pago enviado'), you MUST immediately call `sync_bank_transfers()` BEFORE asking for proof or any other action. This ensures the system has the latest data. "
-        f"- **CRITICAL SYNC STEP**: Before validating, you MUST sync the latest payments. "
-        f"- For CompraClick, call `sync_compraclick_payments()`. "
-        f"- For Bank Transfers, call `sync_bank_transfers()`. "
-        f"- **VALIDATION STEP**: "
-        f"- **CompraClick**: After syncing, use `validate_compraclick_payment` with the correct `authorization_number` and `booking_total`. "
-        f"  * 🚨 CRITICAL: When analyze_payment_proof returns 'receipt_type: compraclick', the 'transaction_id' field in 'extracted_info' IS the authorization code. Use extracted_info.transaction_id directly as authorization_number. DO NOT ask customer for authorization code if already extracted. "
-        f"  * If validation fails with 'Authorization code not found' after 3 attempts or customer can't find code, use `validate_compraclick_payment_fallback` instead. "
-        f"- **Bank Transfer**: CRITICAL - Before calling `validate_bank_transfer`, verify that ALL required data was extracted from the payment proof: "
-        f"  * If the `timestamp` field is missing or empty from `analyze_payment_proof` result, you MUST ask the customer to provide the exact date of the bank transfer (e.g., 'Por favor, indícame la fecha exacta de la transferencia bancaria (formato DD/MM/AAAA)'). "
-        f"  * If the `amount` field is missing, ask the customer to confirm the transfer amount. "
-        f"  * DO NOT attempt validation with incomplete data as it will cause system errors. "
-        f"  * Only call `validate_bank_transfer` once you have complete data: `slip_date`, `slip_amount`, and `booking_amount`. "
-        f"- **AUTOMATIC BOOKING TRIGGER**: Once payment validation succeeds (either CompraClick or Bank Transfer), you MUST IMMEDIATELY proceed to steps 5 and 6 below WITHOUT waiting for additional customer input or confirmation. The customer has already provided payment - proceed directly to complete their booking. "
-        f"4. **Handling Validation Failures (Retry Logic)**: "
-        f"- If validation fails (payment not found), you MUST call the appropriate retry tool: "
-        f"- `trigger_compraclick_retry_for_missing_payment` for CompraClick. "
-        f"- `start_bank_transfer_retry_process` for Bank Transfers. "
-        f"- Inform the user that you are verifying the payment and will notify them shortly. DO NOT ask them to send the proof again unless the retry process also fails. "
-        f"5. **MANDATORY Office Status Check**: "
-        f"- **BEFORE ANY BOOKING ATTEMPT**: You MUST call `check_office_status()` to determine if automation is allowed. This is MANDATORY - no exceptions. "
-        f"- **If office_status = 'closed' OR can_automate = true**: Proceed with automated booking using `make_booking`. "
-        f"- **If office_status = 'open' AND can_automate = false**: "
-        f"  1. IMMEDIATELY call `transfer_to_human_agent` to transfer the conversation to the reservations team. "
-        f"  2. After calling transfer_to_human_agent, send a complete customer message that: "
-        f"     - Confirms payment validation success "
-        f"     - Explains that since offices are open, they'll be transferred to a human agent to complete booking "
-        f"     - Provides booking summary and reassurance "
-        f"  3. DO NOT attempt booking. "
-        f"6. **Booking Confirmation**: "
-        f"- **CRITICAL**: After confirming automation is allowed via `check_office_status`, immediately call the `make_booking` function to reserve the room. DO NOT ask for the information again; use the data you have already collected. "
-        f"- After calling `make_booking`, inform the user that their booking is confirmed and they will receive an email confirmation. "
-        f"When asked for location, use `send_location_pin` and include the EXACT output from the function in your response - do not create your own location text. "
-        f"When asked for the menu or 'what food do you have', use `send_menu_pdf`. When asked specific questions about menu items, prices, or food options (like 'do you have fish?', 'what desserts do you have?', 'how much does the chicken cost?'), first use `read_menu_content` to get current menu information, then answer ONLY with information that is EXPLICITLY written in the PDF content. CRITICAL: DO NOT add descriptions, details, or side dishes that are not specifically mentioned in the PDF text. DO NOT make assumptions about ingredients, preparations, or accompaniments beyond what is explicitly stated. "
-        f"When asked for availability for multi-night stays (2+ nights), use `check_smart_availability` to offer partial stay options if full period unavailable. For single night stays, use `check_room_availability`. "
-        f"When asked for pictures of accommodations, use `send_bungalow_pictures`. When asked for pictures of public areas, facilities, or common spaces, use `send_public_areas_pictures`. "
-        f"To create a payment link, use `create_compraclick_link`. "
-        f"Do not answer from memory."
+        "Persist until customer's query is fully handled end-to-end. "
+        "Load additional modules via load_additional_modules based on core_config, decision_tree, module_dependencies. "
+        "Execute complete workflows yourself using available tools. No shortcuts, no early exits.\n\n"
+        f"Current date/time (El Salvador, GMT-6): {datetime_str}.\n\n"
+        
+        # UNIQUE: CompraClick proof distinction (NOT in base modules)
+        "**CompraClick Proof Distinction**: "
+        "INVALID = 'Número de operación'/'Recibo' screenshot (confirmation screen, NOT valid proof). "
+        "VALID = PDF receipt with 'Autorización' 6-char alphanumeric code. "
+        "If INVALID: (1) Remember number, (2) Explain not correct proof, (3) Ask for PDF from email with 'Autorización' code, (4) Suggest Junk/Spam if not found. "
+        "If repeats same number, insist they need 'Autorización' from PDF.\n\n"
+        
+        # UNIQUE: Payment method consistency (NOT in base modules)
+        "**Payment Method Consistency**: Stay focused on selected method (CompraClick/Bank Transfer). "
+        "Only switch if customer EXPLICITLY states (e.g., 'decidí hacer transferencia'). "
+        "If bank proof received when CompraClick selected, confirm: '¿Decidiste cambiar a transferencia bancaria?'\n\n"
+        
+        # UNIQUE: CompraClick fallback (NOT in base modules)
+        "**CompraClick Fallback**: After 3 failed auth code attempts OR customer can't find code → "
+        "Request: (a) last 4 card digits, (b) exact amount, (c) date → call `validate_compraclick_payment_fallback`.\n\n"
+        
+        # UNIQUE: Immediate sync trigger (NOT in base modules)
+        "**IMMEDIATE SYNC TRIGGER**: Customer says 'ya transferí'/'pago enviado' → call `sync_bank_transfers()` IMMEDIATELY before asking for proof.\n\n"
+        
+        # UNIQUE: Bank transfer data validation (NOT fully in base modules)
+        "**Bank Transfer Validation Data**: "
+        "If `timestamp` missing from analyze_payment_proof → ask customer for exact date (DD/MM/AAAA). "
+        "If `amount` missing → ask to confirm. "
+        "🚨 FUTURE DATE = OCR error (transfers can't be future-dated): re-call analyze_payment_proof, then ask customer to confirm real date. "
+        "With complete data: slip_date=YYYY-MM-DD, slip_amount=booking_amount=extracted amount → call validate_bank_transfer IMMEDIATELY.\n\n"
+        
+        # Reinforcement of critical prohibitions (condensed)
+        "🚨 CRITICAL PROHIBITIONS: "
+        "NEVER say 'no tengo acceso al sistema', 'llame para cotizar', 'nuestro sistema validará', 'le confirmarán'. "
+        "YOU have the tools - USE THEM. After sync completes → validate in SAME turn. After payment validated → check_office_status → make_booking if can_automate=true.\n\n"
+        
+        "Do not answer from memory. Follow CORE_CONFIG.proactive_sales for quoting behavior."
     )
 
     # Check for PENDING bookings that need processing
@@ -1751,37 +1752,19 @@ async def get_openai_response(
             # SECOND API CALL: Send normal message (system + developer + user)
             # Always use previous_response_id to avoid stale tool call conflicts
             
-            # Determine if we should send system_instructions (base_modules)
-            # Send on: conversation start, after context injection, every 4 messages, or if >2 hours since last message
-            time_gap_refresh = time_since_last_message and time_since_last_message > 7200  # 2 hours (7200 seconds)
-            should_send_base_modules = (
-                not previous_response_id or  # New conversation
-                needs_agent_context or  # Just injected agent context
-                current_message_count % 4 == 0 or  # Every 4 messages
-                time_gap_refresh  # >2 hours since last message (prevents stale module cache)
-            )
-            
-            if should_send_base_modules:
-                time_str = f"{time_since_last_message:.1f}s" if time_since_last_message is not None else "N/A"
-                logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv={not previous_response_id}, after_context={needs_agent_context}, periodic={current_message_count % 4 == 0}, time_gap={time_gap_refresh} [{time_str} since last])")
-            else:
-                time_str = f"{time_since_last_message:.1f}s" if time_since_last_message is not None else "N/A"
-                logger.info(f"[MODULE_OPTIMIZATION] Skipping base_modules at message {current_message_count} - using cached from previous_response_id ({time_str} since last)")
-
+            # ALWAYS send system_instructions on every call - OpenAI's automatic prompt caching
+            # will cache the prefix (system instructions + tools) at 50% discount after first call.
+            # This ensures instructions are ALWAYS present and prevents model from "forgetting" rules.
+            logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (always sent - OpenAI caches automatically)")
             
             if previous_response_id:
-                # Continue from existing response
-                input_messages = []
-                
-                # Conditionally add system instructions
-                if should_send_base_modules:
-                    input_messages.append({
+                # Continue from existing response - always include system instructions
+                input_messages = [
+                    {
                         "type": "message",
                         "role": "system",
                         "content": [{"type": "input_text", "text": system_instructions}]
-                    })
-                
-                input_messages.extend([
+                    },
                     {
                         "type": "message", 
                         "role": "developer",
@@ -1792,7 +1775,7 @@ async def get_openai_response(
                         "role": "user", 
                         "content": [{"type": "input_text", "text": message}]
                     }
-                ])
+                ]
                 
                 response = await openai_client.responses.create(
                     model="gpt-5.1",
@@ -1894,12 +1877,7 @@ async def get_openai_response(
                     # Save agent context response ID
                     save_response_id(user_identifier, agent_response.id)
                     
-                    # Determine if we should send base_modules (always True for fresh conversation)
-                    should_send_base_modules = (
-                        True  # Fresh conversation after recovery - always send base modules
-                    )
-                    
-                    logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=True, periodic=False)")
+                    logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh recovery conversation)")
                     
                     # RESTART THE ENTIRE FLOW with fresh conversation
                     input_messages = [
@@ -1935,9 +1913,7 @@ async def get_openai_response(
                     # No agent context available - make API call directly with fresh conversation
                     logger.info(f"[AGENT_CONTEXT] No agent context available for fresh conversation {conversation_id}")
                     
-                    # Determine if we should send base_modules (always True for fresh conversation)
-                    should_send_base_modules = True
-                    logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
+                    logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh conversation without context)")
                     
                     response = await openai_client.responses.create(
                         model="gpt-5.1",
@@ -2169,8 +2145,7 @@ async def get_openai_response(
                         save_response_id(user_identifier, agent_response.id)
                         logger.info(f"[AGENT_CONTEXT] Agent context injected for fresh recovery conversation {conversation_id}")
                         
-                        # Log base_modules sending
-                        logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=True, periodic=False)")
+                        logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (tool error recovery with context)")
                         
                         # RESTART THE ENTIRE FLOW with fresh conversation - use previous_response_id after context
                         response = await openai_client.responses.create(
@@ -2199,7 +2174,7 @@ async def get_openai_response(
                     else:
                         # No agent context - send directly with conversation ID
                         logger.info(f"[AGENT_CONTEXT] No agent context available for fresh recovery conversation {conversation_id}")
-                        logger.info(f"[MODULE_OPTIMIZATION] Sending base_modules at message {current_message_count} (new_conv=True, after_context=False, periodic=False)")
+                        logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (tool error recovery without context)")
                         
                         response = await openai_client.responses.create(
                             model="gpt-5.1",

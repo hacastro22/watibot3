@@ -41,7 +41,7 @@ def _save_retry_state(state: Dict[str, Any]) -> None:
         logger.error(f"Failed to save retry state: {e}")
 
 
-async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dict[str, Any]) -> None:
+async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Start the staged retry process for bank transfer validation and booking.
     
@@ -55,7 +55,31 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
     Args:
         phone_number: Customer's phone number
         payment_data: Dictionary containing slip_date, slip_amount, booking_amount, and booking_data
+    
+    Returns:
+        Dict with success status and any errors
     """
+    # 🚨 VALIDATION: Reject empty phone numbers
+    if not phone_number or not phone_number.strip():
+        logger.error("CRITICAL: start_bank_transfer_retry_process called with empty phone_number!")
+        return {"success": False, "error": "phone_number is required and cannot be empty"}
+    
+    # 🚨 VALIDATION: Check for illogical future dates
+    slip_date = payment_data.get("slip_date", "")
+    if slip_date:
+        try:
+            slip_date_obj = datetime.strptime(slip_date, "%Y-%m-%d")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if slip_date_obj > today:
+                logger.error(f"ILLOGICAL DATE: slip_date {slip_date} is in the future! OCR likely misread the year.")
+                return {
+                    "success": False, 
+                    "error": "future_date",
+                    "message": f"La fecha del comprobante ({slip_date}) está en el futuro. Esto es imposible. Por favor verifique la fecha real de la transferencia con el cliente."
+                }
+        except ValueError as e:
+            logger.warning(f"Could not parse slip_date {slip_date}: {e}")
+    
     logger.info(f"Starting staged retry process for {phone_number}")
     
     # Load current retry state

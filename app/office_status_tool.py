@@ -12,14 +12,19 @@ Used by the assistant before making any booking to determine:
 import os
 import logging
 import mysql.connector
+import time
 from datetime import datetime
 from pytz import timezone
 import holidays
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable, Any
 from . import config
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for office database (limited retries - not critical)
+OFFICE_MAX_RETRIES = 3
+OFFICE_RETRY_DELAY_SECONDS = 2
 
 # El Salvador timezone
 EL_SALVADOR_TZ = timezone('America/El_Salvador')
@@ -271,38 +276,52 @@ def _is_in_automation_window(current_time: datetime) -> Tuple[bool, str]:
 
 def _get_office_database_connection() -> mysql.connector.MySQLConnection:
     """
-    Create database connection for office status queries.
+    Create database connection for office status queries with limited retries.
     Loads credentials directly from .env file for reliability.
     
     Returns:
         MySQL connection object
+        
+    Raises:
+        mysql.connector.Error: If connection fails after OFFICE_MAX_RETRIES attempts
     """
-    try:
-        # Load .env file directly in this function
-        from dotenv import load_dotenv
-        from pathlib import Path
-        import os
-        
-        env_path = Path(__file__).parent.parent / '.env'
-        load_dotenv(dotenv_path=env_path)
-        
-        connection = mysql.connector.connect(
-            host=os.getenv('OFFICE_DB_HOST', '200.31.162.218'),
-            port=int(os.getenv('OFFICE_DB_PORT', '3306')),
-            database=os.getenv('OFFICE_DB_NAME', 'asterisk'),
-            user=os.getenv('OFFICE_DB_USER', ''),
-            password=os.getenv('OFFICE_DB_PASSWORD', ''),
-            charset='utf8',
-            autocommit=True
-        )
-        return connection
-    except mysql.connector.Error as e:
-        logger.error(f"Failed to connect to office status database: {e}")
-        raise
+    from dotenv import load_dotenv
+    from pathlib import Path
+    import os
+    
+    env_path = Path(__file__).parent.parent / '.env'
+    load_dotenv(dotenv_path=env_path)
+    
+    last_error = None
+    
+    for attempt in range(1, OFFICE_MAX_RETRIES + 1):
+        try:
+            connection = mysql.connector.connect(
+                host=os.getenv('OFFICE_DB_HOST', '200.31.162.218'),
+                port=int(os.getenv('OFFICE_DB_PORT', '3306')),
+                database=os.getenv('OFFICE_DB_NAME', 'asterisk'),
+                user=os.getenv('OFFICE_DB_USER', ''),
+                password=os.getenv('OFFICE_DB_PASSWORD', ''),
+                charset='utf8',
+                autocommit=True
+            )
+            if attempt > 1:
+                logger.info(f"[OFFICE_DB] Successfully connected on attempt #{attempt}")
+            return connection
+        except mysql.connector.Error as e:
+            last_error = e
+            logger.warning(f"[OFFICE_DB] Connection attempt #{attempt}/{OFFICE_MAX_RETRIES} failed: {e}")
+            if attempt < OFFICE_MAX_RETRIES:
+                time.sleep(OFFICE_RETRY_DELAY_SECONDS)
+    
+    logger.error(f"[OFFICE_DB] All {OFFICE_MAX_RETRIES} connection attempts failed. Giving up.")
+    raise last_error
 
 def check_office_status() -> Dict[str, any]:
     """
     Check customer service office status and automation eligibility.
+    Uses limited retry (3 attempts) for database operations.
+    If database check fails, defaults to allowing automation so bookings can proceed.
     
     This is the main tool function called by the assistant before making bookings.
     
@@ -313,72 +332,68 @@ def check_office_status() -> Dict[str, any]:
         - can_automate: bool
         - automation_reason: Human-readable automation explanation
     """
+    # Get current time in El Salvador timezone
+    current_time = datetime.now(EL_SALVADOR_TZ)
+    logger.info(f"[OFFICE_STATUS] Checking office status at {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    # Query database for closure rules with limited retry
+    closure_rules = []
     try:
-        # Get current time in El Salvador timezone
-        current_time = datetime.now(EL_SALVADOR_TZ)
-        logger.info(f"[OFFICE_STATUS] Checking office status at {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        
-        # Query database for closure rules
+        connection = _get_office_database_connection()
         try:
-            connection = _get_office_database_connection()
             cursor = connection.cursor()
-            
             query = "SELECT time FROM timegroups_details WHERE timegroupid = 3"
             cursor.execute(query)
             closure_rules = cursor.fetchall()
-            
-            cursor.close()
-            connection.close()
-            
             logger.info(f"[OFFICE_STATUS] Retrieved {len(closure_rules)} closure rules from database")
-            
-        except Exception as e:
-            logger.error(f"[OFFICE_STATUS] Database query failed: {e}")
-            # Fallback: assume offices are open if database fails
-            closure_rules = []
-        
-        # Check if any closure rule matches current time
-        office_closed = False
-        closure_reason = "Open - no matching closure rules in database"
-        
-        for rule_tuple in closure_rules:
-            rule = rule_tuple[0] if rule_tuple and rule_tuple[0] else ""
-            matches, description = _matches_closure_rule(rule, current_time)
-            
-            if matches:
-                office_closed = True
-                closure_reason = f"Closed per database rule: {description}"
-                logger.info(f"[OFFICE_STATUS] Office closed - matched rule: {rule}")
-                break
-        
-        # Determine office status
-        office_status = "closed" if office_closed else "open"
-        
-        # Determine automation eligibility
-        if office_closed:
-            # Offices are closed per database - assistant handles all bookings
-            can_automate = True
-            automation_reason = "Office closed per database - assistant handles all bookings during closures"
-        else:
-            # Offices are open - check automation windows
-            can_automate, automation_reason = _is_in_automation_window(current_time)
-        
-        result = {
-            "office_status": office_status,
-            "reason": closure_reason,
-            "can_automate": can_automate,
-            "automation_reason": automation_reason
-        }
-        
-        logger.info(f"[OFFICE_STATUS] Result: {result}")
-        return result
-        
+        finally:
+            if connection and connection.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                connection.close()
     except Exception as e:
-        logger.error(f"[OFFICE_STATUS] Unexpected error checking office status: {e}")
-        # Fail safely - assume offices are open and require human agent
+        # Database failed after 3 retries - default to allowing automation
+        logger.error(f"[OFFICE_STATUS] Database check failed after {OFFICE_MAX_RETRIES} retries: {e}")
+        logger.info("[OFFICE_STATUS] Defaulting to can_automate=True so bookings can proceed")
         return {
-            "office_status": "open",
-            "reason": f"Error checking office status: {str(e)}",
-            "can_automate": False,
-            "automation_reason": "Error occurred - defaulting to human agent for safety"
+            "office_status": "unknown",
+            "reason": f"Database unavailable after {OFFICE_MAX_RETRIES} retries - defaulting to automation",
+            "can_automate": True,
+            "automation_reason": "Database check failed - allowing automation so bookings can proceed"
         }
+    
+    # Check if any closure rule matches current time
+    office_closed = False
+    closure_reason = "Open - no matching closure rules in database"
+    
+    for rule_tuple in closure_rules:
+        rule = rule_tuple[0] if rule_tuple and rule_tuple[0] else ""
+        matches, description = _matches_closure_rule(rule, current_time)
+        
+        if matches:
+            office_closed = True
+            closure_reason = f"Closed per database rule: {description}"
+            logger.info(f"[OFFICE_STATUS] Office closed - matched rule: {rule}")
+            break
+    
+    # Determine office status
+    office_status = "closed" if office_closed else "open"
+    
+    # Determine automation eligibility
+    if office_closed:
+        can_automate = True
+        automation_reason = "Office closed per database - assistant handles all bookings during closures"
+    else:
+        can_automate, automation_reason = _is_in_automation_window(current_time)
+    
+    result = {
+        "office_status": office_status,
+        "reason": closure_reason,
+        "can_automate": can_automate,
+        "automation_reason": automation_reason
+    }
+    
+    logger.info(f"[OFFICE_STATUS] Result: {result}")
+    return result

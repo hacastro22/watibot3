@@ -872,6 +872,7 @@ def _generate_availability_message(can_fulfill: bool, shortage_info: List[dict])
 ```python
 import asyncio  # For await asyncio.sleep() in retry logic
 from typing import List, Dict, Optional  # For type hints (List already imported)
+from . import smart_availability  # For check_multi_room_availability
 ```
 
 **NEW FUNCTION:**
@@ -916,7 +917,7 @@ async def make_multiple_bookings(
         if not type_found:
             room_requests.append({'type': booking['bungalow_type'], 'count': 1})
     
-    availability = await check_multi_room_availability(check_in_date, check_out_date, room_requests)
+    availability = await smart_availability.check_multi_room_availability(check_in_date, check_out_date, room_requests)
     if not availability['can_fulfill']:
         return {
             "success": False,
@@ -1122,6 +1123,96 @@ async def _update_payment_with_multiple_codes(
             conn.close()
 ```
 
+#### 1.4 Calculate Room Payment Helper
+```python
+# ADD to booking_tool.py
+def _calculate_room_payment(
+    room_booking: dict,
+    total_payment: float, 
+    all_bookings: List[dict],
+    check_in_date: str,
+    check_out_date: str,
+    package_type: str
+) -> float:
+    """
+    Calculate proportional payment for one room in multi-booking scenario.
+    Uses existing _calculate_booking_total function (line 495 in booking_tool.py).
+    """
+    # Get actual cost for this specific room
+    room_cost_result = _calculate_booking_total(
+        check_in_date,
+        check_out_date,
+        room_booking.get('adults', 0),
+        room_booking.get('children_0_5', 0),
+        room_booking.get('children_6_10', 0),
+        package_type
+    )
+    
+    if not room_cost_result.get('success'):
+        # Fallback: distribute payment proportionally by adults
+        total_adults = sum(b.get('adults', 0) for b in all_bookings)
+        if total_adults > 0:
+            return (room_booking.get('adults', 0) / total_adults) * total_payment
+        else:
+            # Final fallback: equal distribution (defensive programming)
+            if len(all_bookings) > 0:
+                return total_payment / len(all_bookings)
+            else:
+                logger.error("[MULTI_BOOKING] No bookings provided to _calculate_room_payment")
+                return 0.0
+    
+    return room_cost_result['total_amount']
+```
+
+#### 1.5 Multi-Booking Message Generator
+```python
+# ADD to booking_tool.py  
+def _generate_multi_booking_message(successful: List[dict], failed: List[dict] = None) -> str:
+    """
+    Generate customer message for multi-room booking results.
+    
+    Args:
+        successful: List of successfully booked rooms
+        failed: List of failed rooms (UNUSED in current ALL-OR-NOTHING implementation)
+    
+    NOTE: Current multi-room implementation uses ALL-OR-NOTHING approach.
+    If any room fails, entire booking fails. The 'failed' parameter is kept
+    for potential future use if partial booking support is added.
+    """
+    # Defensive check - should never have failed bookings in ALL-OR-NOTHING
+    if failed:
+        logger.warning(f"[MULTI_BOOKING] Unexpected failed bookings in ALL-OR-NOTHING mode: {len(failed)}")
+    if not successful:
+        return "Lo sentimos, no pudimos completar ninguna de las reservaciones solicitadas."
+    
+    if len(successful) == 1:
+        booking = successful[0]
+        return f"✅ Reserva confirmada!\nCódigo: HR{booking['reserva']}\n" \
+               f"Tipo: {booking['bungalow_type']}\n" \
+               f"Adultos: {booking['adults']}, Niños 0-5: {booking['children_0_5']}, " \
+               f"Niños 6-10: {booking['children_6_10']}"
+    
+    msg = f"✅ Se confirmaron {len(successful)} habitaciones:\n\n"
+    for i, booking in enumerate(successful, 1):
+        msg += f"{i}. {booking['bungalow_type']} - Código: HR{booking['reserva']}\n"
+        msg += f"   Adultos: {booking['adults']}"
+        if booking['children_0_5'] > 0:
+            msg += f", Niños 0-5: {booking['children_0_5']}"
+        if booking['children_6_10'] > 0:
+            msg += f", Niños 6-10: {booking['children_6_10']}"
+        msg += "\n"
+    
+    # NOTE: In ALL-OR-NOTHING mode, this code path should never execute
+    # Kept for potential future partial booking support
+    if failed:
+        msg += f"\n⚠️ No se pudieron reservar {len(failed)} habitaciones."
+    
+    msg += "\n¡Los detalles han sido enviados a su correo!"
+    return msg
+```
+
+---
+
 ### Phase 2: OpenAI Assistant Integration
 
 **⚠️ CRITICAL PREREQUISITES:**
@@ -1260,9 +1351,86 @@ The following parameters are INJECTED by the system and should NOT be provided b
 
 #### 2.2 Enhanced Assistant Instructions in MODULE_2B_PRICE_INQUIRY
 
-**Location:** Add to `/home/robin/watibot4/app/resources/system_instructions_new.txt` in the MODULE_2B_PRICE_INQUIRY section
+**MOVED TO PHASE 2.5** - See below for the complete System Instructions configuration.
 
-**NOTE:** The system now uses MODULE_2B_PRICE_INQUIRY for all booking and pricing workflows (replaces old MODULE_2_SALES_FLOWS)
+### Phase 2.5: System Instructions Configuration
+
+**⚠️ CRITICAL PREREQUISITES:**
+1. Phase 2.1 (Tool Definitions) MUST be complete.
+
+**Location:** `app/resources/system_instructions_new.txt`
+
+#### 2.5.1 Update MODULE_DEPENDENCIES → INTENT_TO_MODULE_MAP
+
+**Objective:** Register the new tools so the assistant knows when to load them.
+
+**Location:** Add new entry under `MODULE_DEPENDENCIES` → `INTENT_TO_MODULE_MAP` → `PRIORITY_3_SALES`:
+
+```json
+"multi_room_booking": {
+  "load": [
+    "MODULE_1_CRITICAL_WORKFLOWS.pre_quote_member_check",
+    "MODULE_2B_PRICE_INQUIRY",
+    "MODULE_2C_AVAILABILITY"
+  ],
+  "tools": [
+    "check_multi_room_availability",
+    "get_price_for_date",
+    "make_multiple_bookings"
+  ],
+  "🚨 BLOCKER": "Accommodation → '¿es socio?' FIRST. NO availability tools until answered"
+}
+```
+
+**Also update the existing `payment_proof_received` entry** to include the new tool:
+
+```json
+"payment_proof_received": {
+  "load": "MODULE_2B_PRICE_INQUIRY",
+  "tools": [
+    "analyze_payment_proof",
+    "sync_bank_transfers",
+    "validate_bank_transfer",
+    "make_booking",
+    "make_multiple_bookings"  // NEW - for multi-room bookings
+  ]
+}
+```
+
+#### 2.5.2 Update DECISION_TREE
+
+**Objective:** Ensure multi-room intents are correctly classified.
+
+**Location:** Add to `DECISION_TREE` → `priority_based_classification` → `PRIORITY_3_SALES_INTENTS`:
+
+```json
+"multi_room_booking": {
+  "intent": "Customer wants to book 2 or more rooms: 'necesitamos 2 habitaciones', 'somos un grupo de 12', '3 bungalows', 'varias habitaciones'",
+  "action": "Member check → ask distribution → multi-room availability → quote → payment",
+  "module": "MODULE_2B_PRICE_INQUIRY.multi_room_booking_protocol",
+  "🚨 CRITICAL": "NEVER use make_booking multiple times. MUST use make_multiple_bookings for 2+ rooms"
+}
+```
+
+**NOTE:** Place this entry BEFORE "wants_to_book" in the priority order, as multi-room requests should be detected first to route to the correct protocol.
+
+#### 2.5.3 Update CORE_CONFIG
+
+**Objective:** Add safety rules to prevent misuse of single-booking tools for multi-room requests.
+
+**Location:** Add to `CORE_CONFIG` → `🚨 UNIVERSAL_SAFETY_PROTOCOLS`:
+
+```json
+"MULTI_ROOM_BOOKING_SAFETY": {
+  "rule": "IMPERATIVO: Si el cliente solicita reservar más de una habitación, ESTÁ PROHIBIDO usar 'make_booking' múltiples veces. Se DEBE usar 'make_multiple_bookings' en una sola transacción.",
+  "detection": "2+ rooms: 'dos habitaciones', 'tres bungalows', 'varias', 'somos X personas' (where X > room capacity)",
+  "exception": "Si el cliente solicita reservar habitaciones para FECHAS DIFERENTES, entonces sí se deben procesar por separado con make_booking."
+}
+```
+
+#### 2.5.4 Add multi_room_booking_protocol to MODULE_2B_PRICE_INQUIRY
+
+**Location:** Add to `MODULE_2B_PRICE_INQUIRY` section.
 
 ```json
 "multi_room_booking_protocol": {
@@ -1342,117 +1510,18 @@ Without moving this to Phase 0, Phase 1's `make_multiple_bookings()` wrapper wou
 
 ---
 
-### Phase 4: Helper Functions - MINIMAL ADDITIONS
+### Phase 4: DEPRECATED - Moved to Phase 1
 
-**⚠️ PREREQUISITES:**
-- Phase 0 MUST be 100% complete
-- Phase 1.2 `make_multiple_bookings()` must be implemented
-- These helpers are called BY `make_multiple_bookings()` wrapper
+**⚠️ THIS PHASE HAS BEEN DEPRECATED**
 
-**NOTE:** These are helper functions called by the multi-room wrapper, not standalone functions.
+The helper functions originally in Phase 4 have been moved to Phase 1:
+- `_calculate_room_payment()` → Now in **Phase 1.4**
+- `_generate_multi_booking_message()` → Now in **Phase 1.5**
 
-**REQUIRED IMPORTS:** Verify in booking_tool.py:
-```python
-from typing import List, Dict  # For type hints (should already exist from Phase 1)
-```
+**Reason:** These functions are required BY Phase 1.2's `make_multiple_bookings()` wrapper, 
+so they must be implemented as part of Phase 1, not as a separate phase.
 
-**EXISTING FUNCTION USED:**
-```python
-# Phase 4 uses existing _calculate_booking_total() function (line 495 in booking_tool.py)
-# This function calculates total booking cost for given dates and occupancy
-# Signature: def _calculate_booking_total(check_in_date, check_out_date, adults, children_0_5, children_6_10, package_type) -> dict
-# Returns: dict with 'success' and 'total_amount' keys
-```
-
----
-
-#### 4.1 Calculate Room Payment Helper
-```python
-# ADD to booking_tool.py
-def _calculate_room_payment(
-    room_booking: dict,
-    total_payment: float, 
-    all_bookings: List[dict],
-    check_in_date: str,
-    check_out_date: str,
-    package_type: str
-) -> float:
-    """
-    Calculate proportional payment for one room in multi-booking scenario.
-    Uses existing _calculate_booking_total function.
-    """
-    # Get actual cost for this specific room
-    room_cost_result = _calculate_booking_total(
-        check_in_date,
-        check_out_date,
-        room_booking.get('adults', 0),
-        room_booking.get('children_0_5', 0),
-        room_booking.get('children_6_10', 0),
-        package_type
-    )
-    
-    if not room_cost_result.get('success'):
-        # Fallback: distribute payment proportionally by adults
-        total_adults = sum(b.get('adults', 0) for b in all_bookings)
-        if total_adults > 0:
-            return (room_booking.get('adults', 0) / total_adults) * total_payment
-        else:
-            # Final fallback: equal distribution (defensive programming)
-            if len(all_bookings) > 0:
-                return total_payment / len(all_bookings)
-            else:
-                logger.error("[MULTI_BOOKING] No bookings provided to _calculate_room_payment")
-                return 0.0
-    
-    return room_cost_result['total_amount']
-```
-
-#### 4.2 Multi-Booking Message Generator
-```python
-# ADD to booking_tool.py  
-def _generate_multi_booking_message(successful: List[dict], failed: List[dict] = None) -> str:
-    """
-    Generate customer message for multi-room booking results.
-    
-    Args:
-        successful: List of successfully booked rooms
-        failed: List of failed rooms (UNUSED in current ALL-OR-NOTHING implementation)
-    
-    NOTE: Current multi-room implementation uses ALL-OR-NOTHING approach.
-    If any room fails, entire booking fails. The 'failed' parameter is kept
-    for potential future use if partial booking support is added.
-    """
-    # Defensive check - should never have failed bookings in ALL-OR-NOTHING
-    if failed:
-        logger.warning(f"[MULTI_BOOKING] Unexpected failed bookings in ALL-OR-NOTHING mode: {len(failed)}")
-    if not successful:
-        return "Lo sentimos, no pudimos completar ninguna de las reservaciones solicitadas."
-    
-    if len(successful) == 1:
-        booking = successful[0]
-        return f"✅ Reserva confirmada!\nCódigo: HR{booking['reserva']}\n" \
-               f"Tipo: {booking['bungalow_type']}\n" \
-               f"Adultos: {booking['adults']}, Niños 0-5: {booking['children_0_5']}, " \
-               f"Niños 6-10: {booking['children_6_10']}"
-    
-    msg = f"✅ Se confirmaron {len(successful)} habitaciones:\n\n"
-    for i, booking in enumerate(successful, 1):
-        msg += f"{i}. {booking['bungalow_type']} - Código: HR{booking['reserva']}\n"
-        msg += f"   Adultos: {booking['adults']}"
-        if booking['children_0_5'] > 0:
-            msg += f", Niños 0-5: {booking['children_0_5']}"
-        if booking['children_6_10'] > 0:
-            msg += f", Niños 6-10: {booking['children_6_10']}"
-        msg += "\n"
-    
-    # NOTE: In ALL-OR-NOTHING mode, this code path should never execute
-    # Kept for potential future partial booking support
-    if failed:
-        msg += f"\n⚠️ No se pudieron reservar {len(failed)} habitaciones."
-    
-    msg += "\n¡Los detalles han sido enviados a su correo!"
-    return msg
-```
+**No action required for Phase 4.**
 
 ### Phase 5: Payment Tools Enhancement (OPTIONAL)
 
@@ -1686,7 +1755,7 @@ is_multi_room = "room_bookings" in booking_data and len(booking_data["room_booki
 
 #### 6.2 Modifications to bank_transfer_retry.py
 
-**Location 1**: Modify `start_bank_transfer_retry_process()` (line ~65)
+**Location 1**: Modify `start_bank_transfer_retry_process()` (function at line 44, retry_state init at line 65)
 
 ```python
 # Store multi-room flag in retry state
@@ -1848,7 +1917,7 @@ Los detalles de su reserva han sido enviados a su correo electrónico. ¡Esperam
 
 #### 6.3 Modifications to compraclick_retry.py
 
-**Location 1**: Modify `start_compraclick_retry_process()` (line ~42)
+**Location 1**: Modify `start_compraclick_retry_process()` (function at line 45, retry_state init at line 66)
 
 ```python
 # Store multi-room flag in retry state
@@ -1911,12 +1980,13 @@ See **Phase 0** for complete implementation details.
 #### 8.0 Prerequisites
 
 **⚠️ BEFORE USING THIS SUMMARY:**
-This summary reflects ALL corrections made through Phase 6 (plan v3.10):
-- ✅ Phase 0-2 corrections applied (v3.4-3.6)
-- ✅ Phase 3 cleanup applied (v3.7)
-- ✅ Phase 4-6 corrections applied (v3.8-3.10)
+This summary reflects ALL corrections made through v3.14:
+- ✅ Phase 0-2 corrections applied (v3.4-3.6, v3.13)
+- ✅ Phase 3 deprecated, content moved to Phase 0.8 (v3.7)
+- ✅ Phase 4 deprecated, helpers moved to Phase 1.4-1.5 (v3.12)
+- ✅ Phase 5-6 corrections applied (v3.9-3.10, v3.14)
 - 🟡 Phase 5 is OPTIONAL (cosmetic enhancement only)
-- ✅ Phase 7 correctly deprecated (content in Phase 0)
+- ✅ Phase 7 deprecated, content in Phase 0
 
 **Function Count:** 8 required + 1 optional (Phase 5) = 9 total  
 **File Count:** 6 required + 1 optional (Phase 5) = 7 total
@@ -2154,24 +2224,32 @@ await start_compraclick_retry_process("ig_subscriber_789", payment_data_compracl
 - [ ] 0.8: Test backward compatibility with skip_payment_update=False default
 - [ ] **GATE:** Must pass all Phase 0 tests (including retry scenarios) before proceeding
 
-**Day 3-4: PHASE 1 & 2 - Availability and Multi-Room Wrapper**
-
-**Day 5-6: PHASE 2 - Core Wrapper Functions**
-- [ ] Add `make_multiple_bookings()` wrapper with ALL OR NOTHING logic to booking_tool.py
+**Day 3-5: PHASE 1 - Enhanced Availability & Multi-Room Wrapper**
+- [ ] Add `check_multi_room_availability()` to smart_availability.py (Phase 1.1)
+- [ ] Add `_get_available_room_counts()` to smart_availability.py (Phase 1.1)
+- [ ] Add `_map_to_db_type()` helper to smart_availability.py (Phase 1.1)
+- [ ] Add `_generate_availability_message()` to smart_availability.py (Phase 1.1)
+- [ ] Add `make_multiple_bookings()` wrapper to booking_tool.py (Phase 1.2)
 - [ ] Add upfront payment reservation (FULL amount before any bookings)
 - [ ] Add retry logic (3 attempts per room) with exponential backoff
-- [ ] Add `_calculate_room_payment()` helper to booking_tool.py
-- [ ] Add `_generate_multi_booking_message()` helper to booking_tool.py
-- [ ] Add `_update_payment_with_multiple_codes()` to booking_tool.py
+- [ ] Add `_update_payment_with_multiple_codes()` to booking_tool.py (Phase 1.3)
+- [ ] Add `_calculate_room_payment()` helper to booking_tool.py (Phase 1.4)
+- [ ] Add `_generate_multi_booking_message()` helper to booking_tool.py (Phase 1.5)
 - [ ] **CRITICAL:** Use returned selected_room from each booking in exclusion list
 
-**Day 7: Availability & Payment Enhancement**
-- [ ] Add `check_multi_room_availability()` to smart_availability.py
-- [ ] Add `_map_to_db_type()` helper to smart_availability.py
-- [ ] Add `_get_available_room_counts()` to smart_availability.py (API-based) ⚠️ RELOCATED
-- [ ] Add `_format_reservation_codes()` to compraclick_tool.py
-- [ ] Update 2 error message lines in compraclick_tool.py
-- [ ] Add `_format_reservation_codes()` to bank_transfer_tool.py
+**Day 6: PHASE 2 - OpenAI Assistant Integration**
+- [ ] Add `check_multi_room_availability` tool definition to openai_agent.py (line 298)
+- [ ] Add `make_multiple_bookings` tool definition to openai_agent.py (line 298)
+- [ ] Add function mappings to available_functions dict (line 1319)
+- [ ] Add `multi_room_booking_protocol` to MODULE_2B_PRICE_INQUIRY
+- [ ] Add DECISION_TREE entry for multi_room_booking
+- [ ] Add CORE_CONFIG safety rule
+- [ ] Test tool calling and module loading
+
+**Day 7: (OPTIONAL) Phase 5 - Cosmetic Enhancement**
+- [ ] (OPTIONAL) Add `_format_reservation_codes()` to compraclick_tool.py
+- [ ] (OPTIONAL) Update 2 error message lines in compraclick_tool.py (lines 480, 740)
+- [ ] ~~Add `_format_reservation_codes()` to bank_transfer_tool.py~~ **NOT NEEDED** (Phase 5.4 - YAGNI)
 
 **Day 8: Retry Systems Enhancement**
 - [ ] Add multi-room detection to bank_transfer_retry.py
@@ -2181,14 +2259,7 @@ await start_compraclick_retry_process("ig_subscriber_789", payment_data_compracl
 - [ ] Update success messages for multi-room confirmations
 - [ ] Test retry system with both single and multi-room scenarios
 
-**Day 9: Assistant Integration**
-- [ ] Add new tool to `tools` list in openai_agent.py
-- [ ] Add function mapping in openai_agent.py
-- [ ] Add `multi_room_booking_protocol` to MODULE_2B_PRICE_INQUIRY in system_instructions_new.txt
-- [ ] Test tool calling and module loading
-- [ ] Verify MODULE_2B_PRICE_INQUIRY loads correctly
-
-**Day 10-11: Comprehensive Testing**
+**Day 9-10: Comprehensive Testing**
 - [ ] **Test Phase 0 changes** (room exclusion with 3 test scenarios)
 - [ ] Test backward compatibility (single bookings with default parameters)
 - [ ] Test payment reservation upfront (verify used column updates correctly)
@@ -2207,7 +2278,7 @@ await start_compraclick_retry_process("ig_subscriber_789", payment_data_compracl
 - [ ] **Test edge case**: All rooms of a type taken except excluded ones
 - [ ] **Test edge case**: selected_room is returned correctly in all scenarios
 
-**Day 12: Deployment & Monitoring**
+**Day 11: Deployment & Monitoring**
 - [ ] Deploy to production
 - [ ] Monitor first real multi-room bookings
 - [ ] Verify payment reservation logic works correctly
@@ -2215,7 +2286,7 @@ await start_compraclick_retry_process("ig_subscriber_789", payment_data_compracl
 - [ ] Document any edge cases
 - [ ] User acceptance verification
 
-**Estimated Total: 12.5 days** (includes 2.5 days for Phase 0 prerequisites + testing)
+**Estimated Total: 11 days** (includes 2.5 days for Phase 0 prerequisites + comprehensive testing)
 
 ### Phase 10: Risk Mitigation
 
@@ -2520,3 +2591,34 @@ This approach ensures we can deliver multi-room booking capability **safely and 
   - Fixed 5 minor documentation issues identified in deep review
   - Phase 8 confidence: 90% → **100%**
   - Summary now accurately reflects all corrections from Phases 0-6
+- v3.12 (Nov 25, 2025 - 11:40pm): **PHASE 4 → PHASE 1 CONSOLIDATION** ✅
+  - Moved `_calculate_room_payment()` from Phase 4 to Phase 1.4
+  - Moved `_generate_multi_booking_message()` from Phase 4 to Phase 1.5
+  - Phase 4 deprecated (was creating circular dependency with Phase 1.2)
+  - Phase 1 is now self-contained with all required helper functions
+  - Added missing import: `from . import smart_availability` in Phase 1.2
+  - Updated function call: `smart_availability.check_multi_room_availability()`
+  - No changes to function counts or implementation logic
+- v3.13 (Nov 25, 2025 - 11:50pm): **PHASE 2 STRUCTURE CORRECTIONS** ✅
+  - Fixed Phase 2.5.1: MODULE_DEPENDENCIES structure now matches actual file format (INTENT_TO_MODULE_MAP)
+  - Fixed Phase 2.5.2: DECISION_TREE structure now uses intent/action/module format (not keywords/target_module)
+  - Fixed Phase 2.5.3: CORE_CONFIG section name corrected to `🚨 UNIVERSAL_SAFETY_PROTOCOLS`
+  - All JSON structures now match actual system_instructions_new.txt format
+  - Verified tool definitions match OpenAI API format
+  - Verified available_functions at line 1319 and tools array at line 298
+- v3.14 (Nov 25, 2025 - 11:55pm): **PHASE 6 LINE REFERENCE CORRECTIONS** ✅
+  - Fixed bank_transfer_retry.py: function at line 44, retry_state init at line 65 (was "~65")
+  - Fixed compraclick_retry.py: function at line 45, retry_state init at line 66 (was "~42")
+  - Verified _attempt_validation_and_booking at line 200 ✅
+  - Verified _attempt_sync_and_validation at line 177 ✅
+  - All Phase 6 modifications validated against actual code
+- v3.15 (Nov 25, 2025 - 11:58pm): **PHASE 8 TIMELINE & SUMMARY CORRECTIONS** ✅
+  - Updated prerequisites section to reflect v3.14 corrections
+  - Fixed implementation timeline Day 3-5 to correctly reference Phase 1 items
+  - Added Day 6 for Phase 2 (OpenAI Integration) - was missing
+  - Fixed Day 7 to show Phase 5 items as OPTIONAL
+  - Removed duplicate Day 9 (content moved to Day 6)
+  - Corrected bank_transfer_tool.py reference (NOT NEEDED per Phase 5.4)
+  - Updated estimated total: 12.5 days → 11 days
+  - All function counts verified: 8 required + 1 optional = 9 total ✅
+  - All file counts verified: 6 required + 1 optional = 7 total ✅
