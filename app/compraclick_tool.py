@@ -13,7 +13,7 @@ import pandas as pd
 from typing import Dict, Optional, Any
 from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeoutError
 from . import config
-from .database_client import get_db_connection, execute_with_retry
+from .database_client import get_db_connection, execute_with_retry, check_room_availability
 from .wati_client import send_wati_message
 from .compraclick_retry import start_compraclick_retry_process
 from datetime import datetime
@@ -412,7 +412,21 @@ async def validate_compraclick_payment(authorization_number: str, booking_total:
 
             importe = float(result['importe'])
             used = float(result['used'])
+            codreser = result.get('codreser') or ''
             remaining_amount = importe - used
+
+            # Check for ORPHANED reservation (used but no booking completed)
+            if remaining_amount < booking_total and (not codreser or codreser.strip() == ''):
+                # Payment was reserved but booking never completed - reset and allow reuse
+                logger.warning(f"[ORPHAN_RECOVERY] CompraClick {authorization_number}: used={used}, importe={importe}, codreser='{codreser}' - resetting")
+                reset_query = "UPDATE compraclick SET used = 0 WHERE autorizacion = %s"
+                cursor.execute(reset_query, (authorization_number,))
+                conn.commit()
+                logger.info(f"[ORPHAN_RECOVERY] Reset orphaned CompraClick {authorization_number} - now available for booking")
+                
+                # Recalculate with reset values
+                used = 0
+                remaining_amount = importe
 
             is_valid = remaining_amount >= (booking_total * 0.5)
 
@@ -559,9 +573,9 @@ async def validate_compraclick_payment_fallback(
             cursor = conn.cursor(dictionary=True)
             
             query = """
-                SELECT autorizacion, documento, importe, used, codreser, dateused, date
+                SELECT autorizacion, documento, importe, used, codreser, dateused, date, tarjeta
                 FROM compraclick 
-                WHERE documento LIKE %s
+                WHERE tarjeta LIKE %s
                 AND ABS(importe - %s) < 0.01
                 AND date BETWEEN %s AND %s
                 ORDER BY date DESC
@@ -569,7 +583,7 @@ async def validate_compraclick_payment_fallback(
             """
             
             cursor.execute(query, (
-                f"%{card_last_four_clean}",
+                f"%{card_last_four_clean}%",
                 charged_amount,
                 date_start.strftime('%Y-%m-%d %H:%M:%S'),
                 date_end.strftime('%Y-%m-%d %H:%M:%S')
@@ -582,7 +596,7 @@ async def validate_compraclick_payment_fallback(
                 
                 broader_query = """
                     SELECT COUNT(*) as count, 
-                           SUM(CASE WHEN documento LIKE %s THEN 1 ELSE 0 END) as card_matches,
+                           SUM(CASE WHEN tarjeta LIKE %s THEN 1 ELSE 0 END) as card_matches,
                            SUM(CASE WHEN ABS(importe - %s) < 0.01 THEN 1 ELSE 0 END) as amount_matches,
                            SUM(CASE WHEN date BETWEEN %s AND %s THEN 1 ELSE 0 END) as date_matches
                     FROM compraclick
@@ -593,7 +607,7 @@ async def validate_compraclick_payment_fallback(
                 date_range_end = (parsed_date + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
                 
                 cursor.execute(broader_query, (
-                    f"%{card_last_four_clean}",
+                    f"%{card_last_four_clean}%",
                     charged_amount,
                     date_start.strftime('%Y-%m-%d %H:%M:%S'),
                     date_end.strftime('%Y-%m-%d %H:%M:%S'),
@@ -637,7 +651,21 @@ async def validate_compraclick_payment_fallback(
             autorizacion = result['autorizacion']
             importe = float(result['importe'])
             used = float(result['used'])
+            codreser_check = result.get('codreser') or ''
             remaining_amount = importe - used
+            
+            # Check for ORPHANED reservation (used but no booking completed)
+            if remaining_amount < booking_total and (not codreser_check or codreser_check.strip() == ''):
+                # Payment was reserved but booking never completed - reset and allow reuse
+                logger.warning(f"[ORPHAN_RECOVERY] CompraClick fallback {autorizacion}: used={used}, importe={importe}, codreser='{codreser_check}' - resetting")
+                reset_query = "UPDATE compraclick SET used = 0 WHERE autorizacion = %s"
+                cursor.execute(reset_query, (autorizacion,))
+                conn.commit()
+                logger.info(f"[ORPHAN_RECOVERY] Reset orphaned CompraClick {autorizacion} via fallback - now available for booking")
+                
+                # Recalculate with reset values
+                used = 0
+                remaining_amount = importe
             
             is_valid = remaining_amount >= (booking_total * 0.5)
             
@@ -771,24 +799,84 @@ async def reserve_compraclick_payment(authorization_number: str, booking_total: 
     return execute_with_retry(_execute_reservation, f"reserve_compraclick_payment({authorization_number})")
 
 
-async def create_compraclick_link(customer_name: str, payment_amount: float, calculation_explanation: str, payment_percentage: str = "100%") -> dict:
+async def create_compraclick_link(
+    customer_name: str, 
+    payment_amount: float, 
+    calculation_explanation: str, 
+    payment_percentage: str = "100%",
+    service_type: str = "pasadia",
+    check_in_date: str = None,
+    check_out_date: str = None
+) -> dict:
     """
     Creates a CompraClick payment link for the customer. 
 
     IMPORTANT: You must first perform a step-by-step calculation and explain it in the `calculation_explanation` parameter before calling this tool.
     For example: "The user wants to pay 50% of $406. Calculation: $406 * 0.5 = $203. The final payment amount is $203."
     
+    AVAILABILITY GATE: For hospedaje/lodging, this function will verify room availability
+    before creating the payment link. If no rooms are available, no link will be created.
+    
     Args:
         customer_name: Name to use for the payment link.
         payment_amount: Total booking amount.
         calculation_explanation: A step-by-step explanation of how the payment amount was calculated.
         payment_percentage: "50%" or "100%" of total amount.
+        service_type: "pasadia" or "hospedaje" - determines if availability check is needed.
+        check_in_date: Check-in date (YYYY-MM-DD) - REQUIRED for hospedaje.
+        check_out_date: Check-out date (YYYY-MM-DD) - REQUIRED for hospedaje.
     
     Returns:
-        dict: {"success": bool, "link": str, "error": str}
+        dict: {"success": bool, "link": str, "error": str, "availability_blocked": bool}
     """
     # Log the calculation explanation received from the assistant
     logger.info(f"Calculation explanation: {calculation_explanation}")
+    logger.info(f"Service type: {service_type}, Check-in: {check_in_date}, Check-out: {check_out_date}")
+    
+    # 🚨 AVAILABILITY GATE: For lodging, verify room availability BEFORE creating payment link
+    if service_type.lower() in ["hospedaje", "estadía", "estadia", "lodging", "las hojas", "escapadita", "romántico", "romantico"]:
+        if not check_in_date or not check_out_date:
+            logger.error(f"[AVAILABILITY_GATE] Lodging payment blocked - missing dates. Service: {service_type}")
+            return {
+                "success": False,
+                "link": "",
+                "error": "🚨 BLOQUEADO: Para hospedaje/estadía DEBES proporcionar check_in_date y check_out_date. No se puede crear enlace de pago sin verificar disponibilidad primero.",
+                "availability_blocked": True,
+                "assistant_instruction": "Debes llamar check_room_availability con las fechas antes de intentar crear el enlace de pago."
+            }
+        
+        # Check room availability
+        logger.info(f"[AVAILABILITY_GATE] Checking room availability for {check_in_date} to {check_out_date}")
+        availability = await check_room_availability(check_in_date, check_out_date)
+        
+        if "error" in availability:
+            logger.error(f"[AVAILABILITY_GATE] Availability check failed: {availability['error']}")
+            return {
+                "success": False,
+                "link": "",
+                "error": f"Error al verificar disponibilidad: {availability['error']}",
+                "availability_blocked": True,
+                "assistant_instruction": "Hubo un error técnico. Intenta llamar check_room_availability manualmente."
+            }
+        
+        # Check if any rooms are available
+        # availability returns: {'bungalow_familiar': 'Available'/'Not Available', 'bungalow_junior': '...', 'habitacion': '...'}
+        has_availability = any(status == 'Available' for status in availability.values())
+        available_types = [room_type for room_type, status in availability.items() if status == 'Available']
+        
+        if not has_availability:
+            logger.warning(f"[AVAILABILITY_GATE] NO ROOMS AVAILABLE for {check_in_date} to {check_out_date} - Payment link BLOCKED")
+            return {
+                "success": False,
+                "link": "",
+                "error": "🚨 NO HAY DISPONIBILIDAD - No se puede crear enlace de pago porque no hay habitaciones disponibles para las fechas solicitadas.",
+                "availability_blocked": True,
+                "assistant_instruction": f"INFORMA AL CLIENTE: Lamentablemente, en el momento de procesar su pago detectamos que otra persona acaba de reservar la última habitación disponible para las fechas {check_in_date} al {check_out_date}. Le pedimos disculpas por el inconveniente. ¿Le gustaría que busquemos disponibilidad para fechas alternativas usando check_smart_availability?",
+                "check_in_date": check_in_date,
+                "check_out_date": check_out_date
+            }
+        
+        logger.info(f"[AVAILABILITY_GATE] Availability confirmed: {available_types} available. Proceeding with payment link.")
 
     # Load credentials from existing environment setup
     email = os.getenv('COMPRACLICK_EMAIL')

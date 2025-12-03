@@ -156,7 +156,33 @@ async def classify_image_with_context(
         # Step 5: Parse and validate response
         try:
             # Extract text from Chat Completions API format (like watibot3)
-            result_text = response.choices[0].message.content
+            message = response.choices[0].message
+            result_text = message.content
+            
+            # Check for refusal (model declined to process image)
+            if hasattr(message, 'refusal') and message.refusal:
+                logger.error(f"[IMAGE_CLASSIFIER] OpenAI REFUSED to process image for {wa_id}: {message.refusal}")
+                return {
+                    "success": False,
+                    "classification": "payment_proof",  # Assume payment proof if refused
+                    "confidence": 0.5,
+                    "reasoning": f"Model refused: {message.refusal}. Treating as potential payment proof.",
+                    "should_analyze_as_payment": True,
+                    "image_path": image_path  # Pass image path for fallback analysis
+                }
+            
+            # Handle empty or None response
+            if not result_text or not result_text.strip():
+                logger.error(f"[IMAGE_CLASSIFIER] OpenAI returned empty response for {wa_id}. Full response: {response}")
+                return {
+                    "success": False,
+                    "classification": "payment_proof",  # Assume payment proof if empty
+                    "confidence": 0.5,
+                    "reasoning": "OpenAI returned empty response. Treating as potential payment proof.",
+                    "should_analyze_as_payment": True,
+                    "image_path": image_path  # Pass image path for fallback analysis
+                }
+            
             parsed_result = json.loads(result_text)
             
             # Validate and set defaults

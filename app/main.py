@@ -283,13 +283,29 @@ async def process_image_message(wa_id: str, file_path: str, caption: str = None,
     
     Args:
         wa_id: WhatsApp ID
-        file_path: Path to the image file
+        file_path: Path to the image file (can be relative path or full URL)
         caption: Optional caption/text that came with the image
         reply_context_id: Optional reply context ID from universal webhook
     """
     logger.info(f"[PROCESS_IMAGE] Starting processing for image: {file_path} (caption: {caption!r}, reply_context: {reply_context_id!r})")
     tmpfile_path = None
     try:
+        # Fix URL doubling: check if file_path is already a full URL
+        if file_path.startswith("http://") or file_path.startswith("https://"):
+            # Extract just the fileName parameter from the URL
+            import urllib.parse
+            parsed = urllib.parse.urlparse(file_path)
+            query_params = urllib.parse.parse_qs(parsed.query)
+            if 'fileName' in query_params:
+                file_path = query_params['fileName'][0]
+                logger.info(f"[PROCESS_IMAGE] Extracted fileName from URL: {file_path}")
+            else:
+                logger.warning(f"[PROCESS_IMAGE] Full URL provided but no fileName param found: {file_path}")
+        
+        # Detect file extension from path
+        file_ext = os.path.splitext(file_path)[1].lower() or ".jpg"
+        is_pdf = file_ext == ".pdf"
+        
         media_url = f"{config.WATI_API_URL}/api/v1/getMedia?fileName={file_path}"
         headers = {"Authorization": f"Bearer {config.WATI_API_KEY}"}
 
@@ -297,11 +313,40 @@ async def process_image_message(wa_id: str, file_path: str, caption: str = None,
             response = await client.get(media_url, headers=headers, timeout=60)
             response.raise_for_status()
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmpfile:
+            # Use correct file extension
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmpfile:
                 tmpfile.write(response.content)
                 tmpfile_path = tmpfile.name
         
-        logger.info(f"[PROCESS_IMAGE] Image downloaded to temp file: {tmpfile_path} for {wa_id}")
+        logger.info(f"[PROCESS_IMAGE] File downloaded to temp file: {tmpfile_path} for {wa_id}")
+        
+        # Handle PDF files - convert to image using pdf2image
+        if is_pdf:
+            logger.info(f"[PROCESS_IMAGE] PDF detected for {wa_id}. Converting to image...")
+            try:
+                from pdf2image import convert_from_path
+                # Convert first page of PDF to image (most payment proofs are single page)
+                images = convert_from_path(tmpfile_path, first_page=1, last_page=1, dpi=150)
+                if images:
+                    # Save the first page as a temporary JPG
+                    pdf_image_path = tmpfile_path.replace('.pdf', '_converted.jpg')
+                    images[0].save(pdf_image_path, 'JPEG', quality=95)
+                    # Clean up original PDF temp file
+                    try:
+                        os.remove(tmpfile_path)
+                    except:
+                        pass
+                    tmpfile_path = pdf_image_path
+                    logger.info(f"[PROCESS_IMAGE] PDF converted to image: {tmpfile_path} for {wa_id}")
+                else:
+                    logger.error(f"[PROCESS_IMAGE] PDF conversion returned no images for {wa_id}")
+                    return "(User sent a PDF document but it could not be converted. Please ask customer to send a screenshot instead.)"
+            except Exception as pdf_error:
+                logger.exception(f"[PROCESS_IMAGE] Failed to convert PDF to image for {wa_id}: {pdf_error}")
+                if caption:
+                    return f"(User sent a PDF document with caption: '{caption}'. PDF conversion failed - ask customer to send a screenshot of the document instead.)"
+                else:
+                    return "(User sent a PDF document but conversion failed. Please ask customer to send a screenshot of the document instead.)"
 
         classification_result = await image_classifier.classify_image_with_context(
             image_path=tmpfile_path,
@@ -314,7 +359,8 @@ async def process_image_message(wa_id: str, file_path: str, caption: str = None,
         classification = classification_result.get("classification", "unknown")
         confidence = classification_result.get("confidence", 0)
         direct_response = classification_result.get("direct_response")
-        logger.info(f"[PROCESS_IMAGE] Classification for {wa_id}: {classification} (Confidence: {confidence})")
+        should_analyze_as_payment = classification_result.get("should_analyze_as_payment", False)
+        logger.info(f"[PROCESS_IMAGE] Classification for {wa_id}: {classification} (Confidence: {confidence}, should_analyze: {should_analyze_as_payment})")
 
         # If general_inquiry was handled directly with Responses API, send response and skip further processing
         if direct_response:
@@ -328,7 +374,9 @@ async def process_image_message(wa_id: str, file_path: str, caption: str = None,
             else:
                 logger.warning(f"[PROCESS_IMAGE] direct_response exists but no response_text found")
 
-        if classification == 'payment_proof' and confidence >= 0.8:
+        # Analyze as payment proof if high confidence OR if classifier suggests it (fallback for empty responses)
+        if (classification == 'payment_proof' and confidence >= 0.8) or should_analyze_as_payment:
+            logger.info(f"[PROCESS_IMAGE] Analyzing as payment proof for {wa_id} (classification={classification}, confidence={confidence}, should_analyze={should_analyze_as_payment})")
             analysis_result = await payment_proof_tool.analyze_payment_proof(tmpfile_path)
             return f"(User sent a payment proof. Analysis result: {analysis_result})"
         else:

@@ -13,6 +13,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from .bank_transfer_tool import sync_bank_transfers, validate_bank_transfer
+from .database_client import check_room_availability
 from .wati_client import update_chat_status, send_wati_message
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,42 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
         except ValueError as e:
             logger.warning(f"Could not parse slip_date {slip_date}: {e}")
     
+    # 🚨 AVAILABILITY GATE: Check room availability BEFORE starting retry process
+    # If no rooms available, customer already paid but we can't book - escalate immediately
+    booking_data = payment_data.get("booking_data", {})
+    check_in_date = booking_data.get("check_in_date")
+    check_out_date = booking_data.get("check_out_date")
+    package_type = booking_data.get("package_type", "").lower()
+    
+    # Only check availability for lodging (not pasadía)
+    if check_in_date and check_out_date and package_type not in ["pasadía", "pasadia", "day pass"]:
+        logger.info(f"[AVAILABILITY_GATE] Checking availability before bank transfer retry for {check_in_date} to {check_out_date}")
+        availability = await check_room_availability(check_in_date, check_out_date)
+        
+        # availability returns: {'bungalow_familiar': 'Available'/'Not Available', 'bungalow_junior': '...', 'habitacion': '...'}
+        has_availability = any(status == 'Available' for status in availability.values())
+        available_types = [room_type for room_type, status in availability.items() if status == 'Available']
+        
+        if not has_availability:
+            logger.error(f"[AVAILABILITY_GATE] NO ROOMS AVAILABLE for {phone_number} dates {check_in_date} to {check_out_date} - CANNOT process bank transfer")
+            # Escalate immediately - customer paid but no rooms!
+            await update_chat_status(phone_number, "PENDING", "Reservas1")
+            await send_wati_message(
+                phone_number,
+                f"🚨 Estimado cliente, hemos detectado un problema con su reservación.\n\n"
+                f"Lamentablemente, mientras procesábamos su pago, otra persona reservó la última habitación disponible para las fechas {check_in_date} al {check_out_date}.\n\n"
+                f"Un agente de nuestro equipo de reservas se comunicará con usted en breve para ofrecerle fechas alternativas o procesar un reembolso.\n\n"
+                f"Le pedimos disculpas por este inconveniente. 🙏"
+            )
+            return {
+                "success": False, 
+                "error": "no_availability",
+                "message": f"No hay habitaciones disponibles para {check_in_date} al {check_out_date}. Cliente notificado y caso escalado.",
+                "availability_blocked": True
+            }
+        
+        logger.info(f"[AVAILABILITY_GATE] Availability confirmed: {available_types} available for bank transfer retry")
+    
     logger.info(f"Starting staged retry process for {phone_number}")
     
     # Load current retry state
@@ -116,6 +153,8 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
     thread.start()
     
     logger.info(f"Retry process thread started for {phone_number}")
+    
+    return {"success": True, "message": "Retry process started"}
 
 
 async def _execute_retry_process(phone_number: str) -> None:
@@ -293,7 +332,32 @@ Los detalles de su reserva han sido enviados a su correo electrónico. Si tiene 
             logger.info(f"Booking completed successfully for {phone_number}: {booking_result.get('reserva')}")
             return True
         else:
-            logger.warning(f"Booking failed for {phone_number}: {booking_result.get('error')}")
+            error_type = booking_result.get("error", "")
+            logger.warning(f"Booking failed for {phone_number}: {error_type}")
+            
+            # Handle missing customer data - ask customer instead of silently failing
+            if error_type == "missing_customer_data":
+                missing_fields = booking_result.get("missing_fields", [])
+                logger.info(f"[MISSING_DATA] Asking customer {phone_number} for: {missing_fields}")
+                
+                # Build a warm, conversational message asking for missing data
+                if len(missing_fields) == 1:
+                    ask_message = f"¡Hola! 🌴 Para completar su reserva, me ayuda con su {missing_fields[0]}? 😊"
+                else:
+                    fields_text = ", ".join(missing_fields[:-1]) + f" y {missing_fields[-1]}"
+                    ask_message = f"¡Hola! 🌴 Para completar su reserva, solo me faltan algunos datos: {fields_text}. ¿Me los proporciona? 😊"
+                
+                await send_wati_message(phone_number, ask_message)
+                
+                # Mark state so we know we're waiting for customer data
+                retry_state = _load_retry_state()
+                if phone_number in retry_state:
+                    retry_state[phone_number]["waiting_for_data"] = True
+                    retry_state[phone_number]["missing_fields"] = missing_fields
+                    _save_retry_state(retry_state)
+                
+                return False  # Don't continue retrying with bad data
+            
             return False
             
     except Exception as e:

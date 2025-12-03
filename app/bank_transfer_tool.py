@@ -648,12 +648,44 @@ def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: f
 
             # Find an available transfer matching the slip amount and date.
             query = """
-                SELECT id, credit, used FROM bac 
+                SELECT id, credit, used, codreser FROM bac 
                 WHERE credit = %s AND STR_TO_DATE(date, '%d/%m/%Y') = %s AND used < credit
                 LIMIT 1
             """
             cursor.execute(query, (slip_amount, slip_date))
             transfer_record = cursor.fetchone()
+
+            # If no available transfer, check for ORPHANED reservations
+            # (used >= credit but codreser IS NULL means reserved but booking failed)
+            if not transfer_record:
+                orphan_query = """
+                    SELECT id, credit, used, codreser FROM bac 
+                    WHERE credit = %s AND STR_TO_DATE(date, '%d/%m/%Y') = %s 
+                    AND used >= credit AND (codreser IS NULL OR codreser = '')
+                    LIMIT 1
+                """
+                cursor.execute(orphan_query, (slip_amount, slip_date))
+                orphan_record = cursor.fetchone()
+                
+                if orphan_record:
+                    # Found orphaned reservation - reset it and allow reuse
+                    logger.warning(f"[ORPHAN_RECOVERY] Found orphaned reservation ID {orphan_record['id']}: "
+                                   f"used={orphan_record['used']}, credit={orphan_record['credit']}, codreser={orphan_record['codreser']}")
+                    
+                    # Reset the used amount to allow rebooking
+                    reset_query = "UPDATE bac SET used = 0 WHERE id = %s"
+                    cursor.execute(reset_query, (orphan_record['id'],))
+                    conn.commit()
+                    logger.info(f"[ORPHAN_RECOVERY] Reset orphaned transfer ID {orphan_record['id']} - now available for booking")
+                    
+                    # Return as valid with full credit available
+                    return {
+                        "success": True,
+                        "message": f"Pago de {booking_amount:.2f} recuperado y validado exitosamente (reserva previa incompleta).",
+                        "transfer_id": orphan_record['id'],
+                        "available_balance": float(orphan_record['credit']),
+                        "orphan_recovered": True
+                    }
 
             if not transfer_record:
                 logger.warning(f"Validation failed: No unused transfer found for amount {slip_amount} on {slip_date}.")

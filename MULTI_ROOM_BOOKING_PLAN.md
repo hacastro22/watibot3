@@ -1,15 +1,39 @@
 # Multi-Room Booking Implementation Plan
 ## Minimal Changes Strategy for Las Hojas Resort Booking System
 
-## ⚠️ IMPLEMENTATION STATUS: NOT YET STARTED ⚠️
+## ⛔ THIS PLAN IS DEPRECATED ⛔
 
-**As of November 10, 2025 - 10:36pm:**
-- ❌ **NONE of the changes in this plan have been implemented**
-- ❌ All proposed functions are still missing from the codebase
-- ❌ The `make_booking()` function signature has NOT been modified
-- ❌ Retry systems have NOT been updated for multi-room support
-- ✅ Plan remains valid and ready for implementation
-- ✅ All referenced files exist and are in active use
+**As of November 28, 2025:**
+- ⛔ **THIS PLAN HAS BEEN SUPERSEDED BY MULTI_ROOM_BOOKING_PLAN_V2.md**
+- ⛔ The wrapper pattern approach is NO LONGER needed
+- ✅ The external API now supports multi-room booking NATIVELY
+- ✅ See `API_GUIDE_MULTI_ROOM_BOOKING.md` for API documentation
+
+### Why Deprecated?
+The external booking API (`addBookingUserRest`) now supports:
+- `reserverooms = "24+25+26+27"` (multiple rooms in one call)
+- `adultcount = "2+3+2+4"` (different PAX per room)
+
+This means:
+- ❌ No need for wrapper calling `make_booking()` multiple times
+- ❌ No need for `excluded_rooms` parameter propagation
+- ❌ No need for `skip_payment_update` flag
+- ❌ No need for complex ALL-OR-NOTHING logic
+- ✅ API handles atomicity natively in SINGLE transaction
+
+### New Plan Summary
+| Aspect | Old (This Plan) | New (V2) |
+|--------|-----------------|----------|
+| API Calls | N calls for N rooms | 1 call |
+| New Functions | 9 | 3 |
+| Files Modified | 7 | 4 |
+| Implementation | 11 days | 5-6 days |
+
+**👉 See: MULTI_ROOM_BOOKING_PLAN_V2.md**
+
+---
+
+## ⚠️ ORIGINAL PLAN BELOW (DEPRECATED) ⚠️
 
 ## 🔍 FEASIBILITY ANALYSIS COMPLETED ✅
 

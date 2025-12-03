@@ -179,10 +179,23 @@ BEFORE YOU DO ANYTHING ELSE, YOU MUST:
 5. ONLY THEN respond to the user using the loaded module information
 
 YOU ARE ABSOLUTELY FORBIDDEN TO:
-- Skip module loading for complex scenarios
-- Answer questions without loading required modules first (EXCEPTION: Simple quotes with dates+people+member status already known - use get_price_for_date directly)
+- Skip module loading
+- Answer questions without loading required modules first
 - Assume modules are already loaded
 - 🚨 CRITICAL: NEVER say 'no tengo acceso al sistema de tarifas', 'no tengo acceso directo', or 'llame a 2505-2800 para cotizar'. YOU HAVE the get_price_for_date tool - USE IT.
+- 🚨 CRITICAL: NEVER say 'no tengo habilitado el envío del enlace', 'por este medio no puedo enviar enlace', 'llame al 2505-2800 para pago', or ANY variation that deflects payment/booking to phone calls. YOU HAVE create_compraclick_link to generate payment links - USE IT.
+- 🚨 CRITICAL: NEVER tell customers to call ANY phone number for quotes, payments, or bookings. You have ALL the tools needed to complete these tasks.
+
+🚨🚨🚨 LODGING AVAILABILITY GATE - ABSOLUTE REQUIREMENT 🚨🚨🚨
+For ANY lodging/hospedaje/estadía quote, you MUST call check_room_availability or check_smart_availability BEFORE:
+- Quoting a price for lodging
+- Calling create_compraclick_link
+- Accepting or processing any payment
+- Calling make_booking
+
+SEQUENCE: check availability → confirm rooms exist → THEN quote/payment/booking
+NO AVAILABILITY CHECK = NO QUOTE, NO PAYMENT LINK, NO BOOKING. PERIOD.
+If unavailable: Use check_smart_availability to offer partial stays or alternatives.
 
 IF YOU DO NOT FOLLOW THIS RULE, YOU WILL CAUSE REVENUE LOSS AND CUSTOMER SERVICE FAILURES.
 
@@ -229,62 +242,30 @@ async def load_additional_modules(modules: List[str], reasoning: str, user_ident
     1. Sub-modules: "MODULE_2A_PACKAGE_CONTENT", "MODULE_2B_PRICE_INQUIRY", "MODULE_2C_AVAILABILITY", "MODULE_2D_SPECIAL_SCENARIOS"
     2. Micro-loading: "MODULE_2D_SPECIAL_SCENARIOS.membership_sales_protocol"
     
-    Optimization: Skips modules loaded within the last 3 messages unless forced.
+    NOTE: Module skipping optimization was REMOVED because Responses API is STATELESS.
+    Each API call is independent and needs ALL required module content.
+    Previous optimization caused 5x4 promo bug - modules were "skipped" but not actually in context.
     
     Examples:
         - load_additional_modules(["MODULE_2A_PACKAGE_CONTENT"], "Customer asks what's included")
         - load_additional_modules(["MODULE_2D_SPECIAL_SCENARIOS.all_inclusive_inquiry_protocol"], "All-inclusive objection")
         - load_additional_modules(["MODULE_2B_PRICE_INQUIRY", "MODULE_2C_AVAILABILITY"], "Price inquiry needs availability check")
     """
-    from .thread_store import get_loaded_modules, save_loaded_modules, get_message_count
+    from .thread_store import save_loaded_modules, get_message_count
     
-    # Check if modules were recently loaded (within last 3 messages)
-    modules_to_load = []
-    skipped_modules = []
+    # ALWAYS load all requested modules - Responses API is stateless
+    # Previous optimization was flawed: assumed context persists between calls (it doesn't)
+    modules_to_load = modules
     current_message_num = get_message_count(user_identifier) if user_identifier else 0
     
-    if user_identifier:
-        loaded_info = get_loaded_modules(user_identifier)
-        if loaded_info:
-            recently_loaded = loaded_info.get("modules", [])
-            load_message_num = loaded_info.get("message_num", 0)
-            
-            # Skip modules loaded within last 3 messages
-            if current_message_num - load_message_num <= 3:
-                for module in modules:
-                    if module in recently_loaded:
-                        skipped_modules.append(module)
-                        logger.info(f"[MODULE_OPTIMIZATION] Skipping {module} - loaded {current_message_num - load_message_num} message(s) ago")
-                    else:
-                        modules_to_load.append(module)
-            else:
-                modules_to_load = modules
-        else:
-            modules_to_load = modules
-    else:
-        modules_to_load = modules
-    
-    # If all modules were skipped, return early
-    if not modules_to_load:
-        loaded_content = "=== BASE MODULES ALREADY LOADED ===\n"
-        loaded_content += "MODULE_SYSTEM, DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG\n\n"
-        loaded_content += f"=== REQUESTED MODULES ALREADY LOADED ===\n"
-        loaded_content += f"Reasoning: {reasoning}\n"
-        loaded_content += f"Modules: {', '.join(skipped_modules)}\n"
-        loaded_content += f"These modules were loaded {current_message_num - loaded_info.get('message_num', 0)} message(s) ago and are still in context.\n"
-        logger.info(f"[MODULE_OPTIMIZATION] All requested modules already loaded - saved tokens")
-        return loaded_content
+    logger.info(f"[DYNAMIC_LOADING] Loading {len(modules)} modules for stateless API call: {modules}")
     
     with open('app/resources/system_instructions_new.txt', 'r', encoding='utf-8') as f:
         all_modules = json.loads(f.read())
     
-    # Always include base modules
+    # Always include base modules header
     loaded_content = "=== BASE MODULES ALREADY LOADED ===\n"
     loaded_content += "MODULE_SYSTEM, DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG (includes universal safety protocols)\n\n"
-    
-    if skipped_modules:
-        loaded_content += f"=== RECENTLY LOADED MODULES (SKIPPED) ===\n"
-        loaded_content += f"{', '.join(skipped_modules)} - already loaded {current_message_num - loaded_info.get('message_num', 0)} message(s) ago\n\n"
     
     loaded_content += f"=== LOADING ADDITIONAL MODULES ===\nReasoning: {reasoning}\n\n"
     
@@ -328,11 +309,10 @@ async def load_additional_modules(modules: List[str], reasoning: str, user_ident
     loaded_content += "Use ALL loaded modules (base + additional) to provide a comprehensive response to the user.\n"
     loaded_content += "Follow all protocols and guidelines from the loaded modules."
     
-    # Save loaded modules for tracking
+    # Save loaded modules for tracking (used for analytics only, not for skipping)
     if user_identifier:
-        all_loaded = list(set(modules_to_load + skipped_modules))  # Combine and deduplicate
-        save_loaded_modules(user_identifier, all_loaded, current_message_num)
-        logger.info(f"[MODULE_OPTIMIZATION] Saved {len(all_loaded)} loaded modules at message {current_message_num}")
+        save_loaded_modules(user_identifier, modules_to_load, current_message_num)
+        logger.info(f"[DYNAMIC_LOADING] Loaded {len(modules_to_load)} modules at message {current_message_num}")
     
     return loaded_content
 
@@ -375,7 +355,7 @@ tools = [
     {
         "type": "function",
         "name": "create_compraclick_link",
-        "description": "Creates a CompraClick payment link for a customer. Use this when the customer wants to pay via credit card online.",
+        "description": "Creates a CompraClick payment link for a customer. Use this when the customer wants to pay via credit card online. 🚨 AVAILABILITY GATE: For hospedaje/lodging, this tool will verify room availability before creating the link. If no rooms available, the link will NOT be created and you must inform the customer.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -395,9 +375,22 @@ tools = [
                     "type": "string",
                     "description": "Percentage of the total amount to charge (50% deposit or 100% full payment).",
                     "enum": ["50%", "100%"]
+                },
+                "service_type": {
+                    "type": "string",
+                    "description": "Type of service being paid for. Use 'pasadia' for day pass or 'hospedaje' for lodging/overnight stays.",
+                    "enum": ["pasadia", "hospedaje"]
+                },
+                "check_in_date": {
+                    "type": "string",
+                    "description": "Check-in date in YYYY-MM-DD format. REQUIRED for hospedaje service type."
+                },
+                "check_out_date": {
+                    "type": "string",
+                    "description": "Check-out date in YYYY-MM-DD format. REQUIRED for hospedaje service type."
                 }
             },
-            "required": ["customer_name", "payment_amount", "calculation_explanation", "payment_percentage"]
+            "required": ["customer_name", "payment_amount", "calculation_explanation", "payment_percentage", "service_type"]
         }
     },
     {
@@ -658,7 +651,7 @@ tools = [
                 },
                 "email": {
                     "type": "string",
-                    "description": "Customer's email address (must be explicitly provided)"
+                    "description": "Customer's email address. NEVER use placeholders like 'NO_PROVIDED', 'N/A', etc. If missing, DO NOT call make_booking - ask customer first."
                 },
                 "phone_number": {
                     "type": "string",
@@ -666,15 +659,15 @@ tools = [
                 },
                 "city": {
                     "type": "string",
-                    "description": "Customer's city of origin (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' or 'No proporcionado' - if customer hasn't provided their city, ASK THEM before calling make_booking."
+                    "description": "Customer's city of origin. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_booking - ask customer first."
                 },
                 "dui_passport": {
                     "type": "string",
-                    "description": "Customer's DUI or passport number (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' - if customer hasn't provided their DUI/passport, ASK THEM before calling make_booking."
+                    "description": "Customer's DUI or passport number. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_booking - ask customer first."
                 },
                 "nationality": {
                     "type": "string",
-                    "description": "Customer's nationality (must be explicitly provided by customer). NEVER use placeholder values like 'SIN_DATO' - if customer hasn't provided their nationality, ASK THEM before calling make_booking."
+                    "description": "Customer's nationality. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_booking - ask customer first."
                 },
                 "check_in_date": {
                     "type": "string",
@@ -1569,45 +1562,76 @@ async def get_openai_response(
     except Exception as e:
         logger.info(f"[DYNAMIC_LOADING] Using dynamic loading with base size: {len(system_instructions)} chars")
     
-    # Build the contextualized developer message (condensed - base modules contain full protocols)
+    # Build the contextualized developer message - GPT-5.1 optimized patterns from OpenAI Cookbook
     contextualized_message = (
-        "Persist until customer's query is fully handled end-to-end. "
-        "Load additional modules via load_additional_modules based on core_config, decision_tree, module_dependencies. "
-        "Execute complete workflows yourself using available tools. No shortcuts, no early exits.\n\n"
-        f"Current date/time (El Salvador, GMT-6): {datetime_str}.\n\n"
+        # GPT-5.1 SOLUTION PERSISTENCE - Official OpenAI pattern for agentic completion
+        "<solution_persistence>\n"
+        "You are an autonomous sales agent. Once the customer gives direction, proactively gather context, quote, and complete booking without waiting for additional prompts at each step.\n"
+        "Persist until the customer's query is fully handled end-to-end within the current turn.\n"
+        "Be extremely biased for action: if customer provides data that matches a tool's requirements, CALL THE TOOL NOW.\n"
+        "It's very bad to tell the customer 'un ejecutivo le ayudará' when YOU have the tools to help them immediately.\n"
+        "Remember, you are an agent - keep going until the customer's query is completely resolved, before ending your turn.\n"
+        "</solution_persistence>\n\n"
         
-        # UNIQUE: CompraClick proof distinction (NOT in base modules)
-        "**CompraClick Proof Distinction**: "
-        "INVALID = 'Número de operación'/'Recibo' screenshot (confirmation screen, NOT valid proof). "
-        "VALID = PDF receipt with 'Autorización' 6-char alphanumeric code. "
-        "If INVALID: (1) Remember number, (2) Explain not correct proof, (3) Ask for PDF from email with 'Autorización' code, (4) Suggest Junk/Spam if not found. "
-        "If repeats same number, insist they need 'Autorización' from PDF.\n\n"
+        # GPT-5.1 PLANNING BEFORE TOOL CALLS - Required for none reasoning mode
+        "<tool_planning>\n"
+        "Before each tool call, briefly verify you have correct arguments.\n"
+        "After each tool call, reflect on the outcome and determine the next action.\n"
+        "Do NOT end your turn after a single tool call if the workflow is incomplete.\n"
+        "</tool_planning>\n\n"
         
-        # UNIQUE: Payment method consistency (NOT in base modules)
-        "**Payment Method Consistency**: Stay focused on selected method (CompraClick/Bank Transfer). "
-        "Only switch if customer EXPLICITLY states (e.g., 'decidí hacer transferencia'). "
-        "If bank proof received when CompraClick selected, confirm: '¿Decidiste cambiar a transferencia bancaria?'\n\n"
+        f"Current date/time (El Salvador, GMT-6): {datetime_str}.\n"
+        "Load modules via load_additional_modules based on decision_tree and module_dependencies in CORE_CONFIG.\n\n"
         
-        # UNIQUE: CompraClick fallback (NOT in base modules)
-        "**CompraClick Fallback**: After 3 failed auth code attempts OR customer can't find code → "
-        "Request: (a) last 4 card digits, (b) exact amount, (c) date → call `validate_compraclick_payment_fallback`.\n\n"
+        # GPT-5.1 TOOL USAGE RULES - With examples as recommended by OpenAI
+        "<tool_usage_rules>\n"
+        "When customer provides date + people + member status → call get_price_for_date and give price IN THIS TURN.\n"
+        "When customer confirms payment → call generate_compraclick_payment_link IMMEDIATELY.\n"
+        "When customer says 'ya transferí' → call sync_bank_transfers IMMEDIATELY, then validate_bank_transfer.\n"
+        "When validating payment → MUST call validation tool BEFORE claiming payment found/not found.\n"
+        "When completing booking → MUST call make_booking BEFORE saying reservation is confirmed.\n"
+        "</tool_usage_rules>\n\n"
         
-        # UNIQUE: Immediate sync trigger (NOT in base modules)
-        "**IMMEDIATE SYNC TRIGGER**: Customer says 'ya transferí'/'pago enviado' → call `sync_bank_transfers()` IMMEDIATELY before asking for proof.\n\n"
+        # GPT-5.1 TOOL EXAMPLES - OpenAI recommends concrete examples
+        "<tool_examples>\n"
+        "**Quote Example:**\n"
+        "User: '3 adultos, 31 de diciembre, no socio'\n"
+        "Assistant → calls get_price_for_date → receives {price: 297, rate: 99}\n"
+        "Assistant: 'El total es $297. ¿Procedemos con la reserva?'\n\n"
+        "**Payment Link Example:**\n"
+        "User: 'Sí, procedemos'\n"
+        "Assistant → calls generate_compraclick_payment_link → sends link\n"
+        "Assistant: 'Le envié el enlace de pago. Envíeme el comprobante cuando complete.'\n\n"
+        "**Bank Transfer Example:**\n"
+        "User: 'Ya transferí'\n"
+        "Assistant → calls sync_bank_transfers → then validate_bank_transfer → then check_office_status → then make_booking\n"
+        "Assistant: 'Pago validado. Su reserva #XXXXX está confirmada.'\n"
+        "</tool_examples>\n\n"
         
-        # UNIQUE: Bank transfer data validation (NOT fully in base modules)
-        "**Bank Transfer Validation Data**: "
-        "If `timestamp` missing from analyze_payment_proof → ask customer for exact date (DD/MM/AAAA). "
-        "If `amount` missing → ask to confirm. "
-        "🚨 FUTURE DATE = OCR error (transfers can't be future-dated): re-call analyze_payment_proof, then ask customer to confirm real date. "
-        "With complete data: slip_date=YYYY-MM-DD, slip_amount=booking_amount=extracted amount → call validate_bank_transfer IMMEDIATELY.\n\n"
+        # GPT-5.1 WORKFLOW CHAINS - Prevent premature termination
+        "<workflow_chains>\n"
+        "PAYMENT WORKFLOW: Payment tools work 24/7. check_office_status affects ONLY make_booking step.\n"
+        "• can_automate=false means 'human completes booking', NOT 'human processes payment'.\n"
+        "• Correct chain: process payment NOW → validate → check_office_status → make_booking OR transfer_to_human.\n"
+        "BANK TRANSFER CHAIN: sync_bank_transfers → validate_bank_transfer → check_office_status → make_booking. ALL IN SAME TURN.\n"
+        "QUOTE CHAIN: get_price_for_date → present quote → ask to proceed. Complete in same response.\n"
+        "</workflow_chains>\n\n"
         
-        # Reinforcement of critical prohibitions (condensed)
-        "🚨 CRITICAL PROHIBITIONS: "
-        "NEVER say 'no tengo acceso al sistema', 'llame para cotizar', 'nuestro sistema validará', 'le confirmarán'. "
-        "YOU have the tools - USE THEM. After sync completes → validate in SAME turn. After payment validated → check_office_status → make_booking if can_automate=true.\n\n"
+        # GPT-5.1 VERIFICATION - OpenAI recommends verify before execute
+        "<verification_rules>\n"
+        "Before claiming a payment was found/not found → verify you called the validation tool.\n"
+        "Before confirming a booking → verify you called make_booking and received confirmation.\n"
+        "Before stating any policy → verify it exists in loaded modules. If uncertain, load modules first.\n"
+        "</verification_rules>\n\n"
         
-        "Do not answer from memory. Follow CORE_CONFIG.proactive_sales for quoting behavior."
+        # GPT-5.1 FORBIDDEN BEHAVIORS - Clear alternatives prevent deviation
+        "<forbidden_with_alternatives>\n"
+        "❌ 'Un ejecutivo le ayudará con el pago' → ✅ Call payment tool yourself NOW.\n"
+        "❌ 'Le confirmarán la reserva' → ✅ Call make_booking, then confirm with actual code.\n"
+        "❌ 'Nuestro sistema validará' → ✅ Call validate_bank_transfer NOW, you ARE the system.\n"
+        "❌ Inventing policies about meals/check-in → ✅ Load MODULE_2A, use EXACT scripts.\n"
+        "❌ Ending turn after sync_bank_transfers → ✅ Continue to validate_bank_transfer immediately.\n"
+        "</forbidden_with_alternatives>"
     )
 
     # Check for PENDING bookings that need processing
@@ -1861,29 +1885,16 @@ async def get_openai_response(
             # Save this response ID for future continuation
             save_response_id(user_identifier, response.id)
         except Exception as e:
-            # Check if this is a tool call or conversation structure related error
+            # Check if this is a tool call, conversation structure, or stale conversation error
             error_str = str(e).lower()
-            if "tool output" in error_str or "function call" in error_str or "call_id" in error_str or "reasoning" in error_str:
-                logger.warning(f"[OpenAI] Tool call error detected: {e}")
-                logger.info(f"[OpenAI] Creating fresh conversation and completely restarting")
+            if ("tool output" in error_str or "function call" in error_str or "call_id" in error_str or 
+                "reasoning" in error_str or "conversation with id" in error_str or "not found" in error_str):
+                logger.warning(f"[OpenAI] Tool call/conversation error detected: {e}")
+                logger.info(f"[OpenAI] Clearing corrupted conversation state and restarting fresh")
                 
-                # Create completely fresh conversation without trying to recover context
-                async with httpx.AsyncClient() as client:
-                    response_data = await client.post(
-                        "https://api.openai.com/v1/conversations",
-                        headers={
-                            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={}
-                    )
-                    response_data.raise_for_status()
-                    conv_data = response_data.json()
-                    conversation_id = conv_data.get("id")
-                    if not conversation_id:
-                        raise RuntimeError("Conversations API returned no id")
-                
-                save_conversation_id(user_identifier, conversation_id)
+                # Clear corrupted state - OpenAI will create fresh conversation ID
+                save_conversation_id(user_identifier, None)
+                save_response_id(user_identifier, None)
                 
                 # Reset message count and clear loaded modules for fresh start
                 from .thread_store import reset_message_count, clear_loaded_modules
@@ -1895,7 +1906,7 @@ async def get_openai_response(
                 clear_loaded_modules(user_identifier)
                 # Increment to get message 1 for fresh conversation
                 current_message_count = increment_message_count(user_identifier)
-                logger.info(f"[OpenAI] Created fresh conversation {conversation_id} with reset counters (now at message {current_message_count})")
+                logger.info(f"[OpenAI] Reset counters (now at message {current_message_count}), will create fresh conversation")
                 
                 # INJECT AGENT CONTEXT first for fresh conversation (channel-aware)
                 if phone_number and phone_number.isdigit():
@@ -1906,10 +1917,10 @@ async def get_openai_response(
                     agent_context_system_msg = get_manychat_context_for_system_injection(user_identifier)
                 
                 if agent_context_system_msg:
-                    logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh conversation {conversation_id}")
+                    logger.info(f"[AGENT_CONTEXT] Creating fresh conversation with agent context (recovery)")
+                    # DON'T pass conversation parameter - let OpenAI create a new one
                     agent_response = await openai_client.responses.create(
                         model="gpt-5.1",
-                        conversation=conversation_id,
                         input=[{
                             "type": "message",
                             "role": "developer",
@@ -1917,7 +1928,10 @@ async def get_openai_response(
                         }],
                         max_output_tokens=16
                     )
-                    logger.info(f"[AGENT_CONTEXT] Agent context injected for fresh recovery conversation {conversation_id}")
+                    # Extract the REAL conversation ID from OpenAI's response
+                    conversation_id = agent_response.conversation_id
+                    save_conversation_id(user_identifier, conversation_id)
+                    logger.info(f"[AGENT_CONTEXT] Agent context injected, OpenAI created conversation {conversation_id}")
                     
                     # Save agent context response ID
                     save_response_id(user_identifier, agent_response.id)
@@ -1955,14 +1969,14 @@ async def get_openai_response(
                     save_response_id(user_identifier, response.id)
                     logger.info(f"[OpenAI] Successfully restarted with fresh conversation")
                 else:
-                    # No agent context available - make API call directly with fresh conversation
-                    logger.info(f"[AGENT_CONTEXT] No agent context available for fresh conversation {conversation_id}")
+                    # No agent context available - make API call directly, let OpenAI create conversation
+                    logger.info(f"[AGENT_CONTEXT] No agent context available, creating fresh conversation")
                     
                     logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh conversation without context)")
                     
+                    # DON'T pass conversation parameter - let OpenAI create a new one
                     response = await openai_client.responses.create(
                         model="gpt-5.1",
-                        conversation=conversation_id,
                         input=[
                             {
                                 "type": "message",
@@ -1984,9 +1998,11 @@ async def get_openai_response(
                         max_output_tokens=4000
                     )
                     
-                    # Save response ID
+                    # Extract the REAL conversation ID from OpenAI's response
+                    conversation_id = response.conversation_id
+                    save_conversation_id(user_identifier, conversation_id)
                     save_response_id(user_identifier, response.id)
-                    logger.info(f"[OpenAI] Successfully started fresh conversation without context")
+                    logger.info(f"[OpenAI] Successfully started fresh conversation {conversation_id}")
             else:
                 # Re-raise if not a tool call error
                 raise
@@ -2065,7 +2081,9 @@ async def get_openai_response(
                                             'send_public_areas_pictures', 
                                             'send_menu_pdf',  # Tool name, not function name
                                             'send_menu_prices',  # Tool name, not function name
-                                            'transfer_to_human_agent'
+                                            'transfer_to_human_agent',
+                                            'start_bank_transfer_retry_process',  # Needs phone for WATI messages
+                                            'start_compraclick_retry_process'  # Needs phone for WATI messages
                                         ]
                                         
                                         if fn_name in functions_needing_phone:

@@ -14,6 +14,8 @@ import os
 import logging
 import asyncio
 import random
+import threading
+import time
 from datetime import datetime, timedelta
 from pytz import timezone
 import holidays
@@ -35,6 +37,50 @@ EL_SALVADOR_TZ = timezone('America/El_Salvador')
 
 # El Salvador holidays
 EL_SALVADOR_HOLIDAYS = holidays.country_holidays('SV')
+
+# Booking lock to prevent duplicate bookings from concurrent requests
+_booking_locks = {}  # Per-customer locks
+_booking_locks_mutex = threading.Lock()  # Protects the locks dictionary
+_used_authorizations = {}  # Track recently used authorization codes {auth_code: (wa_id, timestamp)}
+_used_authorizations_mutex = threading.Lock()
+AUTHORIZATION_COOLDOWN_SECONDS = 300  # 5 minutes - prevent same auth code reuse
+
+def _get_booking_lock(wa_id: str) -> threading.Lock:
+    """Get or create a lock for a specific customer."""
+    with _booking_locks_mutex:
+        if wa_id not in _booking_locks:
+            _booking_locks[wa_id] = threading.Lock()
+        return _booking_locks[wa_id]
+
+def _check_and_mark_authorization(auth_code: str, wa_id: str) -> tuple:
+    """
+    Check if authorization code was recently used and mark it if not.
+    Returns (is_duplicate, message).
+    """
+    if not auth_code:
+        return False, ""
+    
+    current_time = time.time()
+    auth_key = auth_code.strip().upper()
+    
+    with _used_authorizations_mutex:
+        # Clean old entries (older than cooldown)
+        expired = [k for k, v in _used_authorizations.items() 
+                   if current_time - v[1] > AUTHORIZATION_COOLDOWN_SECONDS]
+        for k in expired:
+            del _used_authorizations[k]
+        
+        # Check if this auth code was recently used
+        if auth_key in _used_authorizations:
+            prev_wa_id, prev_time = _used_authorizations[auth_key]
+            age_seconds = current_time - prev_time
+            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Authorization {auth_code} was used {age_seconds:.0f}s ago for {prev_wa_id}")
+            return True, f"Authorization code {auth_code} was already used for a booking"
+        
+        # Mark as used
+        _used_authorizations[auth_key] = (wa_id, current_time)
+        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] Marked authorization {auth_code} as used for {wa_id}")
+        return False, ""
 
 # Shared Normalization and Assistant Classification Functions
 
@@ -346,6 +392,18 @@ async def make_booking(
     
     # Log booking attempt (internal only)
     logger.info(f"Booking attempt started for customer: {customer_name}, dates: {check_in_date} to {check_out_date}")
+    
+    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used
+    payment_ref = authorization_number or transfer_id
+    if payment_ref:
+        is_duplicate, dup_message = _check_and_mark_authorization(payment_ref, wa_id)
+        if is_duplicate:
+            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Blocking duplicate booking for {wa_id} with payment ref {payment_ref}")
+            return {
+                "success": True,  # Return success to prevent retry loops
+                "already_booked": True,
+                "customer_message": "Esta reserva ya fue procesada anteriormente. Si necesita verificar su reservación, por favor indíquenos."
+            }
     
     # Extract phone number from wa_id if not provided
     if not phone_number or phone_number.strip() == '':
@@ -682,22 +740,27 @@ def _validate_booking_info(
         bungalow_type = "Habitación"
 
     
-    # Check required fields
-    if not all([customer_name, email, phone_number, city, dui_passport, nationality,
-               check_in_date, check_out_date, bungalow_type, package_type,
-               payment_method, payment_maker_name]):
-        return {
-            "valid": False,
-            "error": "Missing required booking information",
-            "customer_message": "Falta información requerida para completar la reserva. Por favor proporcione todos los datos solicitados."
-        }
+    # Check required fields and identify which are missing
+    missing_fields = []
+    if not customer_name or len(customer_name.strip().split()) < 2:
+        missing_fields.append("nombre completo (nombre y apellido)")
+    if not email or "@" not in email:
+        missing_fields.append("correo electrónico válido")
+    if not city:
+        missing_fields.append("ciudad de residencia")
+    if not dui_passport:
+        missing_fields.append("número de DUI o pasaporte")
+    if not nationality:
+        missing_fields.append("nacionalidad")
+    if not payment_maker_name:
+        missing_fields.append("nombre del titular del pago")
     
-    # Validate email format
-    if "@" not in email or "." not in email:
+    if missing_fields:
         return {
             "valid": False,
-            "error": "Invalid email format",
-            "customer_message": "El formato del correo electrónico no es válido. Por favor proporcione un correo válido."
+            "error": "missing_customer_data",
+            "missing_fields": missing_fields,
+            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY"
         }
     
     # Validate dates
@@ -1074,14 +1137,48 @@ async def _make_booking_api_call(
     NEVER expose API details to customers.
     """
     
-    # Internal Chain of Thought: Parse customer name
-    name_parts = customer_name.strip().split()
-    if len(name_parts) >= 2:
-        firstname = name_parts[0]
-        lastname = " ".join(name_parts[1:])
-    else:
-        firstname = customer_name
-        lastname = ""
+    # ═══════════════════════════════════════════════════════════════════════
+    # VALIDATION: Check for required fields BEFORE attempting booking
+    # If any required field is missing, return error so assistant can ask customer
+    # ═══════════════════════════════════════════════════════════════════════
+    missing_fields = []
+    
+    # Validate customer name (must have first AND last name)
+    name_parts = customer_name.strip().split() if customer_name else []
+    if len(name_parts) < 2:
+        missing_fields.append("nombre completo (nombre y apellido)")
+    
+    if not email or not email.strip() or '@' not in email:
+        missing_fields.append("correo electrónico válido")
+    
+    if not city or not city.strip():
+        missing_fields.append("ciudad de residencia")
+    
+    if not nationality or not nationality.strip():
+        missing_fields.append("nacionalidad")
+    
+    if not dui_passport or not dui_passport.strip():
+        missing_fields.append("número de DUI o pasaporte")
+    
+    if not payment_maker_name or not payment_maker_name.strip():
+        missing_fields.append("nombre del titular de la tarjeta/cuenta")
+    
+    # Return error with missing fields so assistant can ask customer
+    if missing_fields:
+        missing_list = ", ".join(missing_fields)
+        logger.warning(f"[BOOKING_VALIDATION] Missing required fields for {wa_id}: {missing_list}")
+        return {
+            "success": False,
+            "error": "missing_customer_data",
+            "missing_fields": missing_fields,
+            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY"
+            # NOTE: Assistant should ask for missing fields in a warm, conversational way
+            # Do NOT use robotic lists - weave the request into natural conversation
+        }
+    
+    # Parse validated customer name
+    firstname = name_parts[0]
+    lastname = " ".join(name_parts[1:])
     
     # Internal Chain of Thought: Determine title
     titulo = "Sra." if any(indicator in firstname.lower() for indicator in ["maria", "ana", "rosa", "carmen"]) else "Sr."
