@@ -21,3 +21,6 @@ xlrd==2.0.1
 # Dependencies for Gmail API
 google-api-python-client==2.134.0
 google-auth-oauthlib==1.2.0
+
+# Retry logic with exponential backoff
+tenacity==8.2.3

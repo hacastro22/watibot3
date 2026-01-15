@@ -19,7 +19,21 @@ import asyncio
 import logging
 from typing import Any, Callable, TypeVar
 
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log,
+)
+
 logger = logging.getLogger(__name__)
+
+# Retry configuration for conversation_locked errors
+CONVERSATION_LOCKED_MAX_RETRIES = 3
+CONVERSATION_LOCKED_MIN_WAIT = 2  # seconds
+CONVERSATION_LOCKED_MAX_WAIT = 10  # seconds
+POST_TIMEOUT_DELAY = 10  # seconds to wait after Flex timeout before trying Standard
 
 T = TypeVar('T')
 
@@ -164,8 +178,11 @@ async def call_with_flex_fallback(
         flex_error = "timeout"
         logger.warning(
             f"[TIER] Flex tier TIMEOUT ({timeout_seconds}s) for {operation_name}, "
-            f"falling back to Standard"
+            f"waiting {POST_TIMEOUT_DELAY}s before Standard fallback (server may still hold conversation lock)"
         )
+        # Wait before Standard fallback - the Flex request may still be running
+        # on OpenAI's servers, which would cause conversation_locked error
+        await asyncio.sleep(POST_TIMEOUT_DELAY)
         
     except Exception as e:
         flex_error = str(e)
@@ -184,12 +201,26 @@ async def call_with_flex_fallback(
                 f"attempting Standard as last resort"
             )
     
-    # Fallback to Standard
+    # Fallback to Standard with retry for conversation_locked
+    def _is_conversation_locked(exception: Exception) -> bool:
+        """Check if error is conversation_locked (retryable)."""
+        return "conversation_locked" in str(exception).lower()
+    
+    @retry(
+        stop=stop_after_attempt(CONVERSATION_LOCKED_MAX_RETRIES),
+        wait=wait_exponential(multiplier=1, min=CONVERSATION_LOCKED_MIN_WAIT, max=CONVERSATION_LOCKED_MAX_WAIT),
+        retry=retry_if_exception(_is_conversation_locked),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+    async def _standard_with_retry():
+        return await standard_call()
+    
     try:
         # Truncate error message for logging
         error_preview = flex_error[:50] if flex_error and len(flex_error) > 50 else flex_error
         logger.info(f"[TIER] Using Standard tier for {operation_name} (Flex failed: {error_preview})")
-        result = await standard_call()
+        result = await _standard_with_retry()
         logger.info(f"[TIER] Standard tier succeeded for {operation_name}")
         return result
         

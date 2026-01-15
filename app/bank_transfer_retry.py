@@ -13,7 +13,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from .bank_transfer_tool import sync_bank_transfers, validate_bank_transfer
-from .database_client import check_room_availability
+from .database_client import check_room_availability, check_room_availability_counts
 from .wati_client import update_chat_status, send_wati_message
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,116 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
                 "message": f"No hay habitaciones disponibles para {check_in_date} al {check_out_date}. Cliente notificado y caso escalado.",
                 "availability_blocked": True
             }
+        
+        # 🚨 CRITICAL FIX: Check if SPECIFIC room type is available
+        bungalow_type = booking_data.get("bungalow_type", "")
+        if bungalow_type:
+            # Map bungalow_type to availability dictionary key
+            type_mapping = {
+                'familiar': 'bungalow_familiar',
+                'bungalow familiar': 'bungalow_familiar',
+                'junior': 'bungalow_junior',
+                'bungalow junior': 'bungalow_junior',
+                'habitación': 'habitacion',
+                'habitacion': 'habitacion',
+                'doble': 'habitacion',
+                'matrimonial': 'bungalow_junior',
+            }
+            
+            normalized_type = bungalow_type.lower().strip()
+            availability_key = type_mapping.get(normalized_type)
+            
+            if availability_key:
+                specific_availability = availability.get(availability_key, 'Not Available')
+                
+                # 🚨 MULTI-ROOM COUNT CHECK: For multi-room bookings, verify enough rooms available
+                adults = booking_data.get("adults", 0)
+                children_6_10 = booking_data.get("children_6_10", 0)
+                num_rooms = booking_data.get("num_rooms", 1)
+                not_enough_rooms = False
+                available_count = 0
+                
+                if num_rooms > 1 and specific_availability == 'Available':
+                    try:
+                        room_counts = await check_room_availability_counts(check_in_date, check_out_date)
+                        if "error" not in room_counts:
+                            available_count = room_counts.get(availability_key, 0)
+                            if available_count < num_rooms:
+                                not_enough_rooms = True
+                                logger.warning(f"[AVAILABILITY_GATE] MULTI-ROOM: Need {num_rooms} {bungalow_type} but only {available_count} available")
+                    except Exception as e:
+                        logger.warning(f"[AVAILABILITY_GATE] Multi-room count check failed: {e}")
+                
+                if specific_availability != 'Available' or not_enough_rooms:
+                    logger.error(f"[AVAILABILITY_GATE] SPECIFIC TYPE '{bungalow_type}' NOT AVAILABLE for {phone_number} dates {check_in_date} to {check_out_date}")
+                    logger.error(f"[AVAILABILITY_GATE] Available types: {available_types}, Requested: {bungalow_type}")
+                    
+                    # 🚨 OCCUPANCY-BASED FILTERING: Find single-room AND multi-room alternatives
+                    compatible_single_room = []
+                    compatible_multi_room = []
+                    total_occupancy = adults + (children_6_10 * 0.5) if adults > 0 else 0
+                    
+                    capacity_rules = {
+                        'bungalow_familiar': (5, 8),
+                        'bungalow_junior': (2, 8),
+                        'habitacion': (2, 4),
+                    }
+                    type_display_names = {
+                        'bungalow_familiar': 'Bungalow Familiar',
+                        'bungalow_junior': 'Bungalow Junior',
+                        'habitacion': 'Habitación Doble',
+                    }
+                    
+                    if adults > 0:
+                        # Check single-room alternatives
+                        for avail_type in available_types:
+                            if avail_type in capacity_rules:
+                                min_cap, max_cap = capacity_rules[avail_type]
+                                if min_cap <= total_occupancy <= max_cap:
+                                    compatible_single_room.append(type_display_names.get(avail_type, avail_type))
+                        
+                        # 🚨 MULTI-ROOM ALTERNATIVES: If no single-room fits, check multi-room options
+                        if not compatible_single_room and total_occupancy > 0:
+                            try:
+                                room_counts = await check_room_availability_counts(check_in_date, check_out_date)
+                                if "error" not in room_counts:
+                                    for room_type, (min_cap, max_cap) in capacity_rules.items():
+                                        available_count = room_counts.get(room_type, 0)
+                                        if available_count >= 2:
+                                            for num_rooms_needed in range(2, min(available_count + 1, 5)):
+                                                per_room = total_occupancy / num_rooms_needed
+                                                if min_cap <= per_room <= max_cap:
+                                                    display_name = type_display_names.get(room_type, room_type)
+                                                    compatible_multi_room.append(f"{num_rooms_needed}x {display_name}")
+                                                    break
+                            except Exception as e:
+                                logger.warning(f"[AVAILABILITY_GATE] Multi-room check failed: {e}")
+                        
+                        logger.info(f"[AVAILABILITY_GATE] Group: {adults} adults + {children_6_10} children, single-room: {compatible_single_room}, multi-room: {compatible_multi_room}")
+                    
+                    all_alternatives = compatible_single_room + compatible_multi_room
+                    
+                    # Escalate immediately - customer paid for room type that's not available!
+                    await update_chat_status(phone_number, "PENDING", "Reservas1")
+                    await send_wati_message(
+                        phone_number,
+                        f"🚨 Estimado cliente, hemos detectado un problema con su reservación.\n\n"
+                        f"El tipo de habitación que cotizó ({bungalow_type}) ya no está disponible para las fechas {check_in_date} al {check_out_date}.\n\n"
+                        f"Un agente de nuestro equipo de reservas se comunicará con usted en breve para ofrecerle alternativas o procesar un reembolso.\n\n"
+                        f"Le pedimos disculpas por este inconveniente. 🙏"
+                    )
+                    return {
+                        "success": False, 
+                        "error": "specific_type_unavailable",
+                        "message": f"El tipo {bungalow_type} no está disponible para {check_in_date} al {check_out_date}. Alternativas single-room: {compatible_single_room if compatible_single_room else 'NINGUNA'}. Alternativas multi-room: {compatible_multi_room if compatible_multi_room else 'NINGUNA'}. Cliente notificado y caso escalado.",
+                        "availability_blocked": True,
+                        "available_types": available_types,
+                        "compatible_single_room": compatible_single_room,
+                        "compatible_multi_room": compatible_multi_room,
+                        "requested_type": bungalow_type,
+                        "group_size": {"adults": adults, "children_6_10": children_6_10, "num_rooms": num_rooms}
+                    }
+                logger.info(f"[AVAILABILITY_GATE] Specific type '{bungalow_type}' confirmed available.")
         
         logger.info(f"[AVAILABILITY_GATE] Availability confirmed: {available_types} available for bank transfer retry")
     

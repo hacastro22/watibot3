@@ -104,16 +104,23 @@ def delete_old_threads(hours: int = 24):
         conn.commit()
 
 def save_conversation_id(identifier: str, conversation_id: str):
-    """Saves conversation_id for Responses API migration."""
+    """
+    Saves conversation_id for Responses API migration.
+    If conversation_id is None, deletes the record to clear corrupted state.
+    """
     with get_conn() as conn:
-        conn.execute("""
-            INSERT INTO threads (wa_id, thread_id, conversation_id, created_at, last_updated, history_imported)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
-            ON CONFLICT(wa_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                conversation_id = excluded.conversation_id,
-                last_updated = excluded.last_updated;
-        """, (identifier, conversation_id, conversation_id))
+        if conversation_id is None:
+            # Clear corrupted conversation state by deleting the record
+            conn.execute("DELETE FROM threads WHERE wa_id = ?", (identifier,))
+        else:
+            conn.execute("""
+                INSERT INTO threads (wa_id, thread_id, conversation_id, created_at, last_updated, history_imported)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(wa_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    conversation_id = excluded.conversation_id,
+                    last_updated = excluded.last_updated;
+            """, (identifier, conversation_id, conversation_id))
         conn.commit()
 
 def get_conversation_id(identifier: str) -> Optional[str]:

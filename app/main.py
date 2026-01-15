@@ -1404,7 +1404,8 @@ async def universal_webhook(request: Request):
         # SAFETY NET: Track messages meant for bot to detect WATI network hiccups
         # If operatorName is None, this message should reach the main /webhook endpoint
         # Start a background task to forward if it doesn't arrive within 10 seconds
-        if operator_name is None and wa_id and caption_text:
+        # Track both text messages (caption_text) AND media messages (file_path) even without captions
+        if operator_name is None and wa_id and (caption_text or file_path):
             message_key = generate_message_key(wa_id, caption_text or file_path or "", message_type)
 
             # Skip tracking if main webhook already marked this key processed before universal arrived

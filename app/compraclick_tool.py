@@ -13,7 +13,7 @@ import pandas as pd
 from typing import Dict, Optional, Any
 from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeoutError
 from . import config
-from .database_client import get_db_connection, execute_with_retry, check_room_availability
+from .database_client import get_db_connection, execute_with_retry, check_room_availability, check_room_availability_counts
 from .wati_client import send_wati_message
 from .compraclick_retry import start_compraclick_retry_process
 from datetime import datetime
@@ -81,68 +81,71 @@ async def sync_compraclick_payments() -> dict:
         logger.error(error_msg)
         return {"success": False, "data": {}, "error": error_msg}
 
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-            page = await browser.new_page()
-            try:
-                # Step 1: Login and Download
-                chain_of_thought["steps"].append({"step": 1, "action": "Login and Download Report", "reasoning": "Access CompraClick portal to get latest transactions", "result": "In progress..."})
-                file_path = await login_and_download_report(page, email, password)
-                chain_of_thought["steps"][-1]["result"] = f"File downloaded to {file_path}"
+    # Retry loop: If Playwright browser is missing, install and retry once
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+                page = await browser.new_page()
+                try:
+                    # Step 1: Login and Download
+                    chain_of_thought["steps"].append({"step": 1, "action": "Login and Download Report", "reasoning": "Access CompraClick portal to get latest transactions", "result": "In progress..."})
+                    file_path = await login_and_download_report(page, email, password)
+                    chain_of_thought["steps"][-1]["result"] = f"File downloaded to {file_path}"
 
-                # Step 2: Process XLS and Insert to DB
-                chain_of_thought["steps"].append({"step": 2, "action": "Process XLS and Update DB", "reasoning": "Parse the report and sync to local database", "result": "In progress..."})
-                result = await process_xls_and_insert_to_db(file_path)
-                chain_of_thought["steps"][-1]["result"] = f"Inserted: {result.get('inserted', 0)}, Skipped: {result.get('skipped', 0)}"
+                    # Step 2: Process XLS and Insert to DB
+                    chain_of_thought["steps"].append({"step": 2, "action": "Process XLS and Update DB", "reasoning": "Parse the report and sync to local database", "result": "In progress..."})
+                    result = await process_xls_and_insert_to_db(file_path)
+                    chain_of_thought["steps"][-1]["result"] = f"Inserted: {result.get('inserted', 0)}, Skipped: {result.get('skipped', 0)}"
 
-                conclusion = f"Successfully synced {result.get('inserted', 0)} new CompraClick transactions."
-                chain_of_thought["conclusion"] = conclusion
-                logger.info(conclusion)
+                    conclusion = f"Successfully synced {result.get('inserted', 0)} new CompraClick transactions."
+                    chain_of_thought["conclusion"] = conclusion
+                    logger.info(conclusion)
 
-                return {
-                    "success": True,
-                    "chain_of_thought": chain_of_thought,
-                    "data": {
-                        "rows_inserted": result.get('inserted', 0),
-                        "rows_skipped": result.get('skipped', 0),
-                        "last_sync_timestamp": datetime.utcnow().isoformat()
-                    },
-                    "error": ""
-                }
+                    return {
+                        "success": True,
+                        "chain_of_thought": chain_of_thought,
+                        "data": {
+                            "rows_inserted": result.get('inserted', 0),
+                            "rows_skipped": result.get('skipped', 0),
+                            "last_sync_timestamp": datetime.utcnow().isoformat()
+                        },
+                        "error": ""
+                    }
 
-            except Exception as e:
-                logger.exception("Error during CompraClick sync process")
-                chain_of_thought["steps"].append({"step": "error", "action": "Sync Failed", "reasoning": str(e), "result": "Failure"})
-                return {"success": False, "chain_of_thought": chain_of_thought, "data": {}, "error": f"An error occurred: {e}"}
-            finally:
-                await logout(page)
-                await browser.close()
-    except Exception as e:
-        error_message = str(e)
-        logger.exception(f"Failed to initialize browser for CompraClick sync: {error_message}")
-        
-        # Check if it's a Playwright browser missing error
-        if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
-            logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick sync!")
+                except Exception as e:
+                    logger.exception("Error during CompraClick sync process")
+                    chain_of_thought["steps"].append({"step": "error", "action": "Sync Failed", "reasoning": str(e), "result": "Failure"})
+                    return {"success": False, "chain_of_thought": chain_of_thought, "data": {}, "error": f"An error occurred: {e}"}
+                finally:
+                    await logout(page)
+                    await browser.close()
+        except Exception as e:
+            error_message = str(e)
+            logger.exception(f"Failed to initialize browser for CompraClick sync (attempt {attempt}/{max_attempts}): {error_message}")
             
-            # Attempt auto-recovery
-            if reinstall_playwright_browsers():
-                logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Please retry the sync.")
-                return {
-                    "success": False, 
-                    "data": {}, 
-                    "error": "Browser was missing but has been auto-installed. Please retry the sync."
-                }
-            else:
-                logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed!")
-                return {
-                    "success": False, 
-                    "data": {}, 
-                    "error": "Browser missing and auto-recovery failed. Please contact support."
-                }
-        
-        return {"success": False, "data": {}, "error": f"Browser initialization failed: {error_message}"}
+            # Check if it's a Playwright browser missing error
+            if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
+                logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick sync!")
+                
+                # Attempt auto-recovery and retry
+                if attempt < max_attempts and reinstall_playwright_browsers():
+                    logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Retrying automatically...")
+                    continue  # Retry the loop
+                elif attempt >= max_attempts:
+                    logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed after max attempts!")
+                    return {
+                        "success": False, 
+                        "data": {}, 
+                        "error": "Browser missing and auto-recovery failed. Please contact support."
+                    }
+            
+            # For non-Playwright errors, return immediately
+            return {"success": False, "data": {}, "error": f"Browser initialization failed: {error_message}"}
+    
+    # Should not reach here, but just in case
+    return {"success": False, "data": {}, "error": "Unexpected error in browser automation"}
 
 async def login_and_download_report(page: Page, email: str, password: str) -> str:
     """Logs in, navigates to sales, and downloads the transaction report."""
@@ -396,7 +399,7 @@ async def validate_compraclick_payment(authorization_number: str, booking_total:
     def _execute_validation():
         conn = get_db_connection()
         try:
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor(dictionary=True, buffered=True)
             query = "SELECT importe, used, codreser, dateused FROM compraclick WHERE autorizacion = %s"
             
             cursor.execute(query, (authorization_number,))
@@ -806,7 +809,11 @@ async def create_compraclick_link(
     payment_percentage: str = "100%",
     service_type: str = "pasadia",
     check_in_date: str = None,
-    check_out_date: str = None
+    check_out_date: str = None,
+    bungalow_type: str = None,
+    adults: int = 0,
+    children_6_10: int = 0,
+    num_rooms: int = 1
 ) -> dict:
     """
     Creates a CompraClick payment link for the customer. 
@@ -816,6 +823,7 @@ async def create_compraclick_link(
     
     AVAILABILITY GATE: For hospedaje/lodging, this function will verify room availability
     before creating the payment link. If no rooms are available, no link will be created.
+    If bungalow_type is specified, it will verify that SPECIFIC room type is available.
     
     Args:
         customer_name: Name to use for the payment link.
@@ -825,13 +833,34 @@ async def create_compraclick_link(
         service_type: "pasadia" or "hospedaje" - determines if availability check is needed.
         check_in_date: Check-in date (YYYY-MM-DD) - REQUIRED for hospedaje.
         check_out_date: Check-out date (YYYY-MM-DD) - REQUIRED for hospedaje.
+        bungalow_type: Room type being booked (Familiar, Junior, Habitación, Matrimonial) - REQUIRED for hospedaje.
+        adults: Number of adults in the group - used to filter compatible room alternatives.
+        children_6_10: Number of children aged 6-10 - used to calculate occupancy.
+        num_rooms: Number of rooms being booked (default 1) - for multi-room bookings.
     
     Returns:
         dict: {"success": bool, "link": str, "error": str, "availability_blocked": bool}
     """
     # Log the calculation explanation received from the assistant
     logger.info(f"Calculation explanation: {calculation_explanation}")
-    logger.info(f"Service type: {service_type}, Check-in: {check_in_date}, Check-out: {check_out_date}")
+    logger.info(f"Service type: {service_type}, Check-in: {check_in_date}, Check-out: {check_out_date}, Bungalow type: {bungalow_type}")
+    logger.info(f"Group: {adults} adults, {children_6_10} children 6-10, {num_rooms} room(s)")
+    
+    # 🚨 PLACEHOLDER VALIDATION: Reject placeholder customer names
+    placeholder_values = [
+        'cliente', 'pendiente', 'pendiente_nombre', 'no_provided', 'not_provided',
+        'n/a', 'na', 'sin_dato', 'por_definir', 'unknown', 'desconocido', 'auto'
+    ]
+    customer_name_lower = customer_name.strip().lower() if customer_name else ''
+    
+    if not customer_name or len(customer_name.strip()) < 3 or customer_name_lower in placeholder_values:
+        logger.warning(f"[PLACEHOLDER_BLOCKED] Rejected invalid customer_name: '{customer_name}'")
+        return {
+            "success": False,
+            "link": "",
+            "error": f"🚨 BLOQUEADO: El nombre '{customer_name}' no es válido. Debes solicitar el nombre REAL del cliente antes de crear el enlace de pago.",
+            "assistant_instruction": "PREGUNTA AL CLIENTE: '¿Me proporciona su nombre completo para el enlace de pago?' NUNCA uses placeholders como 'Cliente', 'PENDIENTE', 'NO_PROVIDED', etc."
+        }
     
     # 🚨 AVAILABILITY GATE: For lodging, verify room availability BEFORE creating payment link
     if service_type.lower() in ["hospedaje", "estadía", "estadia", "lodging", "las hojas", "escapadita", "romántico", "romantico"]:
@@ -843,6 +872,17 @@ async def create_compraclick_link(
                 "error": "🚨 BLOQUEADO: Para hospedaje/estadía DEBES proporcionar check_in_date y check_out_date. No se puede crear enlace de pago sin verificar disponibilidad primero.",
                 "availability_blocked": True,
                 "assistant_instruction": "Debes llamar check_room_availability con las fechas antes de intentar crear el enlace de pago."
+            }
+        
+        # 🚨 CRITICAL: Require bungalow_type for hospedaje to prevent paying for unavailable room types
+        if not bungalow_type:
+            logger.error(f"[AVAILABILITY_GATE] Lodging payment blocked - missing bungalow_type. Service: {service_type}")
+            return {
+                "success": False,
+                "link": "",
+                "error": "🚨 BLOQUEADO: Para hospedaje/estadía DEBES proporcionar bungalow_type (Familiar, Junior, Habitación, Matrimonial) para verificar que ese tipo específico esté disponible antes de cobrar.",
+                "availability_blocked": True,
+                "assistant_instruction": "DEBES especificar bungalow_type al llamar create_compraclick_link para hospedaje. Opciones: Familiar, Junior, Habitación, Matrimonial."
             }
         
         # Check room availability
@@ -876,6 +916,133 @@ async def create_compraclick_link(
                 "check_out_date": check_out_date
             }
         
+        # 🚨 CRITICAL FIX: If bungalow_type specified, check that SPECIFIC type is available
+        # For multi-room bookings, also verify ENOUGH rooms are available
+        if bungalow_type:
+            # Map bungalow_type to availability dictionary key
+            type_mapping = {
+                'familiar': 'bungalow_familiar',
+                'bungalow familiar': 'bungalow_familiar',
+                'junior': 'bungalow_junior',
+                'bungalow junior': 'bungalow_junior',
+                'habitación': 'habitacion',
+                'habitacion': 'habitacion',
+                'doble': 'habitacion',
+                'matrimonial': 'bungalow_junior',  # Matrimonial uses Junior range
+            }
+            
+            normalized_type = bungalow_type.lower().strip()
+            availability_key = type_mapping.get(normalized_type)
+            
+            if availability_key:
+                specific_availability = availability.get(availability_key, 'Not Available')
+                
+                # 🚨 MULTI-ROOM COUNT CHECK: For multi-room bookings, verify enough rooms available
+                not_enough_rooms = False
+                available_count = 0
+                if num_rooms > 1 and specific_availability == 'Available':
+                    try:
+                        room_counts = await check_room_availability_counts(check_in_date, check_out_date)
+                        if "error" not in room_counts:
+                            available_count = room_counts.get(availability_key, 0)
+                            if available_count < num_rooms:
+                                not_enough_rooms = True
+                                logger.warning(f"[AVAILABILITY_GATE] MULTI-ROOM: Need {num_rooms} {bungalow_type} but only {available_count} available")
+                    except Exception as e:
+                        logger.warning(f"[AVAILABILITY_GATE] Multi-room count check failed: {e}")
+                
+                if specific_availability != 'Available' or not_enough_rooms:
+                    logger.warning(f"[AVAILABILITY_GATE] SPECIFIC TYPE '{bungalow_type}' NOT AVAILABLE for {check_in_date} to {check_out_date} - Payment link BLOCKED")
+                    logger.warning(f"[AVAILABILITY_GATE] Available types: {available_types}, Requested: {bungalow_type} ({availability_key})")
+                    
+                    # 🚨 OCCUPANCY-BASED FILTERING: Suggest single-room AND multi-room alternatives
+                    compatible_single_room = []
+                    compatible_multi_room = []
+                    total_occupancy = adults + (children_6_10 * 0.5) if adults > 0 else 0
+                    
+                    # Room capacity rules: {type: (min, max)}
+                    capacity_rules = {
+                        'bungalow_familiar': (5, 8),
+                        'bungalow_junior': (2, 8),
+                        'habitacion': (2, 4),
+                    }
+                    type_display_names = {
+                        'bungalow_familiar': 'Bungalow Familiar',
+                        'bungalow_junior': 'Bungalow Junior',
+                        'habitacion': 'Habitación Doble',
+                    }
+                    
+                    if adults > 0:
+                        # Check single-room alternatives
+                        for avail_type in available_types:
+                            if avail_type in capacity_rules:
+                                min_cap, max_cap = capacity_rules[avail_type]
+                                if min_cap <= total_occupancy <= max_cap:
+                                    compatible_single_room.append(type_display_names.get(avail_type, avail_type))
+                                    logger.info(f"[AVAILABILITY_GATE] Single-room compatible: {avail_type} (occupancy {total_occupancy} fits {min_cap}-{max_cap})")
+                        
+                        # 🚨 MULTI-ROOM ALTERNATIVES: If no single-room fits, check multi-room options
+                        if not compatible_single_room and total_occupancy > 0:
+                            try:
+                                room_counts = await check_room_availability_counts(check_in_date, check_out_date)
+                                if "error" not in room_counts:
+                                    logger.info(f"[AVAILABILITY_GATE] Room counts for multi-room check: {room_counts}")
+                                    
+                                    for room_type, (min_cap, max_cap) in capacity_rules.items():
+                                        available_count = room_counts.get(room_type, 0)
+                                        if available_count >= 2:
+                                            # Calculate rooms needed: distribute group evenly
+                                            for num_rooms_needed in range(2, min(available_count + 1, 5)):  # Max 4 rooms
+                                                per_room = total_occupancy / num_rooms_needed
+                                                if min_cap <= per_room <= max_cap:
+                                                    display_name = type_display_names.get(room_type, room_type)
+                                                    multi_option = f"{num_rooms_needed}x {display_name} ({available_count} disponibles)"
+                                                    if multi_option not in compatible_multi_room:
+                                                        compatible_multi_room.append(multi_option)
+                                                        logger.info(f"[AVAILABILITY_GATE] Multi-room compatible: {num_rooms_needed}x {room_type} (per-room {per_room:.1f} fits {min_cap}-{max_cap})")
+                                                    break  # Found minimum rooms needed for this type
+                            except Exception as e:
+                                logger.warning(f"[AVAILABILITY_GATE] Multi-room check failed: {e}")
+                        
+                        logger.info(f"[AVAILABILITY_GATE] Group occupancy: {total_occupancy}, Single-room options: {compatible_single_room}, Multi-room options: {compatible_multi_room}")
+                    
+                    # Build instruction based on available alternatives
+                    all_alternatives = compatible_single_room + compatible_multi_room
+                    if all_alternatives:
+                        alternatives_str = ', '.join(all_alternatives)
+                        # Special message for multi-room bookings that can't be fulfilled
+                        if not_enough_rooms and compatible_single_room:
+                            instruction = f"INFORMA AL CLIENTE: Solo hay {available_count} {bungalow_type}(s) disponibles pero usted necesita {num_rooms}. Sin embargo, su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''} SÍ cabe en UNA SOLA habitación: {', '.join(compatible_single_room)}. El precio se recalculará. ¿Desea cambiar a una sola habitación o buscar otras fechas?"
+                        elif not_enough_rooms:
+                            instruction = f"INFORMA AL CLIENTE: Solo hay {available_count} {bungalow_type}(s) disponibles pero usted necesita {num_rooms}. Alternativas disponibles: {alternatives_str}. ¿Desea cambiar o buscar otras fechas?"
+                        elif compatible_multi_room and not compatible_single_room:
+                            instruction = f"INFORMA AL CLIENTE: El tipo {bungalow_type} ya NO está disponible para {check_in_date} al {check_out_date}. Su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''} NO cabe en una sola habitación, pero SÍ pueden usar MÚLTIPLES habitaciones: {alternatives_str}. El precio se calcula por persona. ¿Desea esta opción o buscar otras fechas?"
+                        else:
+                            instruction = f"INFORMA AL CLIENTE: El tipo {bungalow_type} ya NO está disponible para {check_in_date} al {check_out_date}. Alternativas para su grupo: {alternatives_str}. El precio puede variar. ¿Desea cambiar o buscar otras fechas?"
+                    elif adults > 0:
+                        if not_enough_rooms:
+                            instruction = f"🚨 Solo hay {available_count} {bungalow_type}(s) disponibles (necesita {num_rooms}) y NO HAY ALTERNATIVAS compatibles. DEBES ofrecer: 1) Buscar otras fechas con check_smart_availability, o 2) Reembolso completo."
+                        else:
+                            instruction = f"🚨 El tipo {bungalow_type} ya NO está disponible y NO HAY ALTERNATIVAS para su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''}. DEBES ofrecer: 1) Buscar otras fechas con check_smart_availability, o 2) Reembolso completo."
+                    else:
+                        instruction = f"INFORMA AL CLIENTE: El tipo {bungalow_type} ya NO está disponible para {check_in_date} al {check_out_date}. Los tipos disponibles son: {', '.join(available_types)}. Pregunta si desea cambiar o buscar otras fechas."
+                    
+                    return {
+                        "success": False,
+                        "link": "",
+                        "error": f"🚨 NO HAY DISPONIBILIDAD del tipo de habitación solicitado ({bungalow_type}) - No se puede crear enlace de pago.",
+                        "availability_blocked": True,
+                        "available_types": available_types,
+                        "compatible_single_room": compatible_single_room,
+                        "compatible_multi_room": compatible_multi_room,
+                        "requested_type": bungalow_type,
+                        "group_size": {"adults": adults, "children_6_10": children_6_10, "num_rooms": num_rooms},
+                        "assistant_instruction": instruction,
+                        "check_in_date": check_in_date,
+                        "check_out_date": check_out_date
+                    }
+                logger.info(f"[AVAILABILITY_GATE] Specific type '{bungalow_type}' confirmed available.")
+        
         logger.info(f"[AVAILABILITY_GATE] Availability confirmed: {available_types} available. Proceeding with payment link.")
 
     # Load credentials from existing environment setup
@@ -893,96 +1060,99 @@ async def create_compraclick_link(
     # Format amount to 2 decimal places
     actual_payment_amount = round(actual_payment_amount, 2)
     
-    try:
-        async with async_playwright() as p:
-            # Launch browser with proper configuration
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized']
-            )
-            
-            # Create a context with proper download behavior
-            context = await browser.new_context()
-            page = await context.new_page()
-            
-            try:
-                logger.info(f"Starting CompraClick link creation for customer: {customer_name}, "
-                          f"amount: {actual_payment_amount} ({payment_percentage})")
-                
-                # STEP 1: Authentication
-                link = await authenticate_and_navigate(page, email, password)
-                if link:
-                    # If we already have a link from a previous step (error handling), return it
-                    return {"success": True, "link": link, "error": ""}
-                
-                # STEP 2: Navigate to CompraClick section and create new link
-                link = await create_new_compraclick(
-                    page, 
-                    customer_name=customer_name,
-                    payment_amount=actual_payment_amount
+    # Retry loop: If Playwright browser is missing, install and retry once
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with async_playwright() as p:
+                # Launch browser with proper configuration
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized']
                 )
                 
-                # Return the result
-                if link:
-                    logger.info(f"Successfully created CompraClick link for {customer_name}")
-                    return {"success": True, "link": link, "error": ""}
-                else:
+                # Create a context with proper download behavior
+                context = await browser.new_context()
+                page = await context.new_page()
+                
+                try:
+                    logger.info(f"Starting CompraClick link creation for customer: {customer_name}, "
+                              f"amount: {actual_payment_amount} ({payment_percentage})")
+                    
+                    # STEP 1: Authentication
+                    link = await authenticate_and_navigate(page, email, password)
+                    if link:
+                        # If we already have a link from a previous step (error handling), return it
+                        return {"success": True, "link": link, "error": ""}
+                    
+                    # STEP 2: Navigate to CompraClick section and create new link
+                    link = await create_new_compraclick(
+                        page, 
+                        customer_name=customer_name,
+                        payment_amount=actual_payment_amount
+                    )
+                    
+                    # Return the result
+                    if link:
+                        logger.info(f"Successfully created CompraClick link for {customer_name}")
+                        return {"success": True, "link": link, "error": ""}
+                    else:
+                        return {
+                            "success": False, 
+                            "link": "", 
+                            "error": "Failed to create or retrieve CompraClick link"
+                        }
+                
+                except Exception as e:
+                    logger.exception(f"Error in CompraClick automation: {str(e)}")
+                    # Take a screenshot on error for debugging
+                    screenshot_path = f"/tmp/compraclick_error_{int(time.time())}.png"
+                    error_message = f"CompraClick automation error: {str(e)}"
+                    try:
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.info(f"Screenshot saved to {screenshot_path} on error.")
+                        error_message += f" Screenshot saved to {screenshot_path}"
+                    except Exception as screenshot_err:
+                        logger.error(f"Failed to take screenshot: {screenshot_err}")
+                    
+                    return {"success": False, "link": "", "error": error_message}
+                
+                finally:
+                    # Always attempt to logout and close resources
+                    try:
+                        await logout(page)
+                    except Exception as logout_err:
+                        logger.warning(f"Error during logout (non-critical): {str(logout_err)}")
+                    finally:
+                        await context.close()
+                        await browser.close()
+                        logger.info("Browser closed")
+        
+        except Exception as e:
+            error_message = str(e)
+            logger.exception(f"Failed to initialize browser automation (attempt {attempt}/{max_attempts}): {error_message}")
+            
+            # Check if it's a Playwright browser missing error
+            if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
+                logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick tool!")
+                
+                # Attempt auto-recovery and retry
+                if attempt < max_attempts and reinstall_playwright_browsers():
+                    logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Retrying automatically...")
+                    continue  # Retry the loop
+                elif attempt >= max_attempts:
+                    logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed after max attempts!")
                     return {
                         "success": False, 
                         "link": "", 
-                        "error": "Failed to create or retrieve CompraClick link"
+                        "error": "Browser missing and auto-recovery failed. Please contact support."
                     }
             
-            except Exception as e:
-                logger.exception(f"Error in CompraClick automation: {str(e)}")
-                # Take a screenshot on error for debugging
-                screenshot_path = f"/tmp/compraclick_error_{int(time.time())}.png"
-                error_message = f"CompraClick automation error: {str(e)}"
-                try:
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    logger.info(f"Screenshot saved to {screenshot_path} on error.")
-                    error_message += f" Screenshot saved to {screenshot_path}"
-                except Exception as screenshot_err:
-                    logger.error(f"Failed to take screenshot: {screenshot_err}")
-                
-                return {"success": False, "link": "", "error": error_message}
-            
-            finally:
-                # Always attempt to logout and close resources
-                try:
-                    await logout(page)
-                except Exception as logout_err:
-                    logger.warning(f"Error during logout (non-critical): {str(logout_err)}")
-                finally:
-                    await context.close()
-                    await browser.close()
-                    logger.info("Browser closed")
+            # For non-Playwright errors, return immediately
+            return {"success": False, "link": "", "error": f"Browser automation initialization failed: {error_message}"}
     
-    except Exception as e:
-        error_message = str(e)
-        logger.exception(f"Failed to initialize browser automation: {error_message}")
-        
-        # Check if it's a Playwright browser missing error
-        if "Executable doesn't exist" in error_message or "playwright" in error_message.lower():
-            logger.warning("[PLAYWRIGHT_ERROR] Detected missing browser error in CompraClick tool!")
-            
-            # Attempt auto-recovery
-            if reinstall_playwright_browsers():
-                logger.info("[PLAYWRIGHT_RECOVERY] Browsers reinstalled! Please retry the operation.")
-                return {
-                    "success": False, 
-                    "link": "", 
-                    "error": "Browser was missing but has been auto-installed. Please try again in a moment."
-                }
-            else:
-                logger.error("[PLAYWRIGHT_RECOVERY] Auto-recovery failed!")
-                return {
-                    "success": False, 
-                    "link": "", 
-                    "error": "Browser missing and auto-recovery failed. Please contact support."
-                }
-        
-        return {"success": False, "link": "", "error": f"Browser automation initialization failed: {error_message}"}
+    # Should not reach here, but just in case
+    return {"success": False, "link": "", "error": "Unexpected error in browser automation"}
 
 
 async def authenticate_and_navigate(page: Page, email: str, password: str) -> Optional[str]:
@@ -1167,6 +1337,15 @@ async def trigger_compraclick_retry_for_missing_payment(phone_number: str, autho
     Returns:
         dict: Success status and customer message
     """
+    # 🚨 VALIDATION: Check for empty phone number to prevent 404 errors
+    if not phone_number or phone_number.strip() == "" or phone_number == "AUTO":
+        logger.error(f"INVALID PHONE NUMBER: phone_number is empty or 'AUTO'. Cannot start retry process.")
+        return {
+            "success": False,
+            "error": "invalid_phone_number",
+            "message": "🚨 ERROR: No se proporcionó un número de teléfono válido. El phone_number no puede estar vacío ni ser 'AUTO'. Use el wa_id del cliente para este parámetro."
+        }
+    
     try:
         logger.info(f"Triggering CompraClick retry for missing payment - Phone: {phone_number}, Auth: {authorization_number}")
         

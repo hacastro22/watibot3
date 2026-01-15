@@ -29,7 +29,8 @@ def get_db_connection():
                 host=config.DB_HOST,
                 user=config.DB_USER,
                 password=config.DB_PASSWORD,
-                database=config.DB_NAME
+                database=config.DB_NAME,
+                connection_timeout=60
             )
             if retry_count > 0:
                 logger.info(f"[DB_RETRY] Successfully connected after {retry_count} retries")
@@ -92,11 +93,9 @@ async def check_room_availability(check_in_date: str, check_out_date: str) -> di
         try:
             cursor = conn.cursor(dictionary=True)
             
-            # Set session variables for check-in and check-out dates
-            cursor.execute("SET @check_in = %s;", (check_in_date,))
-            cursor.execute("SET @check_out = %s;", (check_out_date,))
-
-            query = """
+            # NOTE: Session variables don't work inside CTEs in MySQL
+            # We use string formatting for dates (safe since dates are validated upstream)
+            query = f"""
                 WITH
                 all_rooms AS (
                     SELECT '1'  AS room_number UNION ALL SELECT '2'  UNION ALL SELECT '3'  UNION ALL SELECT '4'  UNION ALL SELECT '5'  UNION ALL
@@ -117,65 +116,101 @@ async def check_room_availability(check_in_date: str, check_out_date: str) -> di
                     SELECT 'Pasadía'
                 ),
                 booked_rooms_in_range AS (
+                    /* Parse user_books.reserverooms - handles both "1-ROOM1+ROOM2" and "ROOM1+ROOM2" formats */
                     SELECT DISTINCT
                         TRIM(
-                            CASE
-                                WHEN reserverooms NOT LIKE '%-%' THEN reserverooms
-                                ELSE SUBSTRING_INDEX(
-                                         SUBSTRING_INDEX(SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1), ',', numbers.n),
-                                         ',', -1)
-                            END
+                            SUBSTRING_INDEX(
+                                SUBSTRING_INDEX(
+                                    REPLACE(
+                                        CASE
+                                            WHEN reserverooms LIKE '%-%' THEN SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1)
+                                            ELSE reserverooms
+                                        END,
+                                        '+', ','
+                                    ),
+                                    ',', numbers.n
+                                ),
+                                ',', -1
+                            )
                         ) AS room_number
                     FROM user_books
                     CROSS JOIN (
-                        SELECT 1 n UNION ALL SELECT 2  UNION ALL SELECT 3  UNION ALL SELECT 4  UNION ALL
-                        SELECT 5  UNION ALL SELECT 6  UNION ALL SELECT 7  UNION ALL SELECT 8  UNION ALL
-                        SELECT 9  UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL
-                        SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15 UNION ALL SELECT 16 UNION ALL
-                        SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19 UNION ALL SELECT 20
+                        /* Numbers 1-200 using cross join for efficiency (handles large event bookings) */
+                        SELECT a.n + b.n * 10 + 1 as n
+                        FROM (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) a
+                        CROSS JOIN (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15 UNION ALL SELECT 16 UNION ALL SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19) b
+                        WHERE a.n + b.n * 10 + 1 <= 200
                     ) numbers
                     WHERE cancel_flag != 'yes'
                       AND checkIn  IS NOT NULL AND checkIn  != ''
                       AND checkOut IS NOT NULL AND checkOut != ''
-                      AND STR_TO_DATE(checkIn , '%m/%d/%Y') < @check_out
-                      AND STR_TO_DATE(checkOut, '%m/%d/%Y') > @check_in
-                      AND (
-                            (reserverooms NOT LIKE '%-%' AND numbers.n = 1) OR
-                            (reserverooms LIKE  '%-%' AND
-                             numbers.n <= (LENGTH(SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1)) -
-                                           LENGTH(REPLACE(SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1), ',', '')) + 1))
-                          )
+                      AND STR_TO_DATE(checkIn , '%m/%d/%Y') < STR_TO_DATE('{check_out_date}', '%Y-%m-%d')
+                      AND STR_TO_DATE(checkOut, '%m/%d/%Y') > STR_TO_DATE('{check_in_date}', '%Y-%m-%d')
+                      AND numbers.n <= (
+                          LENGTH(REPLACE(
+                              CASE
+                                  WHEN reserverooms LIKE '%-%' THEN SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1)
+                                  ELSE reserverooms
+                              END,
+                              '+', ','
+                          )) -
+                          LENGTH(REPLACE(REPLACE(
+                              CASE
+                                  WHEN reserverooms LIKE '%-%' THEN SUBSTRING(reserverooms, LOCATE('-', reserverooms) + 1)
+                                  ELSE reserverooms
+                              END,
+                              '+', ','
+                          ), ',', '')) + 1
+                      )
 
                     UNION
 
+                    /* Parse member_books.room_number - handles both "1-ROOM1+ROOM2" and "ROOM1+ROOM2" formats */
                     SELECT DISTINCT
                         TRIM(
-                            CASE
-                                WHEN room_number NOT LIKE '%-%' THEN room_number
-                                ELSE SUBSTRING_INDEX(
-                                         SUBSTRING_INDEX(SUBSTRING(room_number, LOCATE('-', room_number) + 1), ',', numbers.n),
-                                         ',', -1)
-                            END
+                            SUBSTRING_INDEX(
+                                SUBSTRING_INDEX(
+                                    REPLACE(
+                                        CASE
+                                            WHEN room_number LIKE '%-%' THEN SUBSTRING(room_number, LOCATE('-', room_number) + 1)
+                                            ELSE room_number
+                                        END,
+                                        '+', ','
+                                    ),
+                                    ',', numbers.n
+                                ),
+                                ',', -1
+                            )
                         ) AS room_number
                     FROM member_books
                     CROSS JOIN (
-                        SELECT 1 n UNION ALL SELECT 2  UNION ALL SELECT 3  UNION ALL SELECT 4  UNION ALL
-                        SELECT 5  UNION ALL SELECT 6  UNION ALL SELECT 7  UNION ALL SELECT 8  UNION ALL
-                        SELECT 9  UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL
-                        SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15 UNION ALL SELECT 16 UNION ALL
-                        SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19 UNION ALL SELECT 20
+                        /* Numbers 1-200 using cross join for efficiency (handles large event bookings) */
+                        SELECT a.n + b.n * 10 + 1 as n
+                        FROM (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) a
+                        CROSS JOIN (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15 UNION ALL SELECT 16 UNION ALL SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19) b
+                        WHERE a.n + b.n * 10 + 1 <= 200
                     ) numbers
                     WHERE cancel_flag != 'yes'
                       AND checkIn  IS NOT NULL AND checkIn  != ''
                       AND checkOut IS NOT NULL AND checkOut != ''
-                      AND STR_TO_DATE(checkIn , '%m/%d/%Y') < @check_out
-                      AND STR_TO_DATE(checkOut, '%m/%d/%Y') > @check_in
-                      AND (
-                            (room_number NOT LIKE '%-%' AND numbers.n = 1) OR
-                            (room_number LIKE  '%-%' AND
-                             numbers.n <= (LENGTH(SUBSTRING(room_number, LOCATE('-', room_number) + 1)) -
-                                           LENGTH(REPLACE(SUBSTRING(room_number, LOCATE('-', room_number) + 1), ',', '')) + 1))
-                          )
+                      AND STR_TO_DATE(checkIn , '%m/%d/%Y') < STR_TO_DATE('{check_out_date}', '%Y-%m-%d')
+                      AND STR_TO_DATE(checkOut, '%m/%d/%Y') > STR_TO_DATE('{check_in_date}', '%Y-%m-%d')
+                      AND numbers.n <= (
+                          LENGTH(REPLACE(
+                              CASE
+                                  WHEN room_number LIKE '%-%' THEN SUBSTRING(room_number, LOCATE('-', room_number) + 1)
+                                  ELSE room_number
+                              END,
+                              '+', ','
+                          )) -
+                          LENGTH(REPLACE(REPLACE(
+                              CASE
+                                  WHEN room_number LIKE '%-%' THEN SUBSTRING(room_number, LOCATE('-', room_number) + 1)
+                                  ELSE room_number
+                              END,
+                              '+', ','
+                          ), ',', '')) + 1
+                      )
                 ),
                 available_rooms_categorized AS (
                     SELECT
@@ -232,6 +267,83 @@ async def check_room_availability(check_in_date: str, check_out_date: str) -> di
                 conn.close()
     
     return execute_with_retry(_execute_availability_check, f"check_room_availability({check_in_date}, {check_out_date})")
+
+
+async def check_room_availability_counts(check_in_date: str, check_out_date: str) -> dict:
+    """
+    Checks room availability for a given date range and returns COUNTS of available rooms by type.
+    
+    Uses the same API as booking_tool.py to ensure consistency.
+    Use this for multi-room bookings where knowing exact counts is critical.
+    Returns: {'bungalow_familiar': X, 'bungalow_junior': Y, 'habitacion': Z, 'total': T}
+    """
+    import httpx
+    
+    try:
+        url = "https://booking.lashojasresort.club/api/getRooms"
+        params = {
+            "checkIn": check_in_date,
+            "checkOut": check_out_date
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=300.0)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if "info" not in data:
+                return {"error": "Invalid response format from room availability API"}
+            
+            available_rooms = data["info"]  # {"index": "room_number", ...}
+            
+            # Parse room numbers from API response
+            room_numbers = []
+            for room_index, room_number in available_rooms.items():
+                if room_number == "Pasadía":
+                    continue  # Skip Pasadía for counting
+                elif room_number.endswith('A'):
+                    room_numbers.append(room_number)  # Keep as string like "10A"
+                else:
+                    try:
+                        room_numbers.append(int(room_number))
+                    except ValueError:
+                        continue
+            
+            # Count by type using same logic as booking_tool.py _select_room
+            # Familiar: rooms 1-17
+            familiar_count = len([r for r in room_numbers if isinstance(r, int) and 1 <= r <= 17])
+            
+            # Junior: rooms 18-59 (excluding matrimonial rooms 22, 42, 47, 48, 53)
+            matrimonial_rooms = {22, 42, 47, 48, 53}
+            junior_count = len([r for r in room_numbers if isinstance(r, int) and 18 <= r <= 59 and r not in matrimonial_rooms])
+            
+            # Habitación: rooms with 'A' suffix (1A-14A)
+            habitacion_count = 0
+            for room_name in room_numbers:
+                if isinstance(room_name, str) and room_name.endswith('A'):
+                    try:
+                        num = int(room_name[:-1])
+                        if 1 <= num <= 14:
+                            habitacion_count += 1
+                    except ValueError:
+                        continue
+            
+            results = {
+                'bungalow_familiar': familiar_count,
+                'bungalow_junior': junior_count,
+                'habitacion': habitacion_count,
+                'total': familiar_count + junior_count + habitacion_count
+            }
+            
+            logger.info(f"Availability COUNTS for {check_in_date} to {check_out_date}: {results}")
+            return results
+            
+    except Exception as e:
+        logger.error(f"Room availability count check failed: {e}")
+        return {"error": f"Room availability count check failed: {e}"}
+
+
 from datetime import datetime
 
 

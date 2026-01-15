@@ -361,7 +361,7 @@ tools = [
             "properties": {
                 "customer_name": {
                     "type": "string",
-                    "description": "The name of the customer for the payment link."
+                    "description": "Customer's REAL full name (2+ words). 🚨 NEVER use placeholders like 'Cliente', 'PENDIENTE', 'PENDIENTE_NOMBRE', 'NO_PROVIDED', 'N/A', etc. If customer hasn't provided their name yet, DO NOT call this tool - ask customer first: '¿Me proporciona su nombre completo para el enlace de pago?'"
                 },
                 "payment_amount": {
                     "type": "number",
@@ -388,6 +388,23 @@ tools = [
                 "check_out_date": {
                     "type": "string",
                     "description": "Check-out date in YYYY-MM-DD format. REQUIRED for hospedaje service type."
+                },
+                "bungalow_type": {
+                    "type": "string",
+                    "description": "Type of room being booked (Familiar, Junior, Habitación, Matrimonial). REQUIRED for hospedaje to verify specific room type availability.",
+                    "enum": ["Familiar", "Junior", "Habitación", "Matrimonial"]
+                },
+                "adults": {
+                    "type": "integer",
+                    "description": "Number of adults in the group. REQUIRED for hospedaje to filter compatible room alternatives if quoted type is unavailable."
+                },
+                "children_6_10": {
+                    "type": "integer",
+                    "description": "Number of children aged 6-10 in the group. Used to calculate occupancy (count as 0.5 each)."
+                },
+                "num_rooms": {
+                    "type": "integer",
+                    "description": "Number of rooms being booked (default 1). For multi-room bookings, used to calculate per-room occupancy."
                 }
             },
             "required": ["customer_name", "payment_amount", "calculation_explanation", "payment_percentage", "service_type"]
@@ -533,6 +550,25 @@ tools = [
     },
     {
         "type": "function",
+        "name": "check_room_availability_counts",
+        "description": "🚨 USE FOR MULTI-ROOM BOOKINGS. Returns the EXACT COUNT of available rooms by type (not just Available/Not Available). Use this BEFORE quoting or accepting payment for groups needing 2+ rooms. Returns: {bungalow_familiar: X, bungalow_junior: Y, habitacion: Z, total: T}. Example: If customer needs 3 Junior rooms, call this first to verify at least 3 are available.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "check_in_date": {
+                    "type": "string",
+                    "description": "The check-in date in YYYY-MM-DD format."
+                },
+                "check_out_date": {
+                    "type": "string",
+                    "description": "The check-out date in YYYY-MM-DD format."
+                }
+            },
+            "required": ["check_in_date", "check_out_date"]
+        }
+    },
+    {
+        "type": "function",
         "name": "send_bungalow_pictures",
         "description": "Sends pictures of a specific bungalow type to the user. Use this when the user asks for photos of the accommodations.",
         "parameters": {
@@ -585,7 +621,7 @@ tools = [
     {
         "type": "function",
         "name": "validate_compraclick_payment_fallback",
-        "description": "Fallback validation for CompraClick payments when authorization code is not available. Use this ONLY after customer fails to provide correct authorization code 3 times OR explicitly states they cannot find it. Validates payment by matching credit card last 4 digits, charged amount, and payment date.",
+        "description": "Fallback validation for CompraClick payments when authorization code is not available. Use this when: (1) customer cannot provide authorization code, (2) OCR detects card charge to 'LAS HOJAS RESORT' but no authorization field, (3) customer shows bank statement with charge but no receipt. ASK customer for card last 4 digits if not already known. Validates by matching card digits + amount + date.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -715,7 +751,7 @@ tools = [
                 },
                 "authorization_number": {
                     "type": "string",
-                    "description": "CompraClick authorization number (if payment method is CompraClick)"
+                    "description": "🚨 REQUIRED for CompraClick: The authorization code from analyze_payment_proof (e.g., '053551'). NEVER leave empty - booking BLOCKED without it."
                 },
                 "transfer_id": {
                     "type": "string",
@@ -735,6 +771,122 @@ tools = [
                 }
             },
             "required": ["customer_name", "email", "phone_number", "city", "dui_passport", "nationality", "check_in_date", "check_out_date", "adults", "children_0_5", "children_6_10", "bungalow_type", "package_type", "payment_method", "payment_amount", "payment_maker_name", "wa_id"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "make_multi_room_booking",
+        "description": "Book multiple rooms in a single transaction. Use when customer needs 2+ rooms. All rooms are booked atomically - all succeed or all fail. CRITICAL: This tool can ONLY be used AFTER payment proof has been verified. All booking information must be explicitly provided by the customer - NEVER use placeholders.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "customer_name": {
+                    "type": "string",
+                    "description": "Full name of the primary guest (must be explicitly provided, not inferred)"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Customer's email address. NEVER use placeholders like 'NO_PROVIDED', 'N/A', etc. If missing, DO NOT call make_multi_room_booking - ask customer first."
+                },
+                "phone_number": {
+                    "type": "string",
+                    "description": "Customer's phone number. For WhatsApp (WATI) users, use 'AUTO' and it will be extracted from waId. For Facebook/Instagram users, this MUST be explicitly asked from the customer and provided here (cannot be inferred)."
+                },
+                "city": {
+                    "type": "string",
+                    "description": "Customer's city of origin. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_multi_room_booking - ask customer first."
+                },
+                "dui_passport": {
+                    "type": "string",
+                    "description": "Customer's DUI or passport number. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_multi_room_booking - ask customer first."
+                },
+                "nationality": {
+                    "type": "string",
+                    "description": "Customer's nationality. NEVER use placeholders like 'SIN_DATO', 'NO_PROVIDED', 'N/A', 'Unknown', etc. If missing, DO NOT call make_multi_room_booking - ask customer first."
+                },
+                "check_in_date": {
+                    "type": "string",
+                    "description": "Check-in date in YYYY-MM-DD format (must be explicitly provided)"
+                },
+                "check_out_date": {
+                    "type": "string",
+                    "description": "Check-out date in YYYY-MM-DD format (must be explicitly provided)"
+                },
+                "room_bookings": {
+                    "type": "array",
+                    "description": "Array of room configurations. Each room must have explicit guest counts.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "bungalow_type": {
+                                "type": "string",
+                                "enum": ["Junior", "Familiar", "Matrimonial", "Habitación"],
+                                "description": "Type of room (must be explicitly provided). NOTE: Pasadía not supported for multi-room."
+                            },
+                            "adults": {
+                                "type": "integer",
+                                "description": "Number of adults for this room (must be explicitly provided)"
+                            },
+                            "children_0_5": {
+                                "type": "integer",
+                                "description": "Number of children aged 0-5 years old (FREE - no package needed). Use 0 if none. CRITICAL: This field is for infants/toddlers who are FREE. Do NOT put 'paquete niño' purchases here."
+                            },
+                            "children_6_10": {
+                                "type": "integer",
+                                "description": "Number of children aged 6-10 years old who have PAID child packages ('paquete niño'). Use 0 if none. CRITICAL: When customer purchases 'paquete niño' or 'paquetes de niño', put the count HERE (not in children_0_5). This is the field that charges the child rate."
+                            }
+                        },
+                        "required": ["bungalow_type", "adults", "children_0_5", "children_6_10"]
+                    }
+                },
+                "package_type": {
+                    "type": "string",
+                    "enum": ["Las Hojas", "Escapadita", "Romántico"],
+                    "description": "Package type for all rooms (must be explicitly provided). NOTE: Pasadía not supported for multi-room."
+                },
+                "payment_method": {
+                    "type": "string",
+                    "enum": ["CompraClick", "Depósito BAC"],
+                    "description": "Payment method: CompraClick or Depósito BAC (determined from payment verification)"
+                },
+                "payment_amount": {
+                    "type": "number",
+                    "description": "Actual total amount paid by customer for ALL rooms (from payment verification). May be partial payment, deposit, or full payment."
+                },
+                "payment_maker_name": {
+                    "type": "string",
+                    "description": "Name of the person who made the payment (from payment verification)"
+                },
+                "wa_id": {
+                    "type": "string",
+                    "description": "WhatsApp ID of the customer (extracted from conversation context)"
+                },
+                "authorization_number": {
+                    "type": "string",
+                    "description": "🚨 REQUIRED for CompraClick: The authorization code from analyze_payment_proof (e.g., '053551'). NEVER leave empty - booking BLOCKED without it."
+                },
+                "transfer_id": {
+                    "type": "string",
+                    "description": "Bank transfer ID (if payment method is Depósito BAC)"
+                },
+                "extra_beds": {
+                    "type": "integer",
+                    "description": "Total number of extra beds requested across all rooms (0 if none). CRITICAL: Follow extra bed policy from system instructions."
+                },
+                "extra_beds_cost": {
+                    "type": "number",
+                    "description": "Total cost for extra beds (0.0 if free or none). Use $15.00 per bed for paid beds."
+                },
+                "customer_instructions": {
+                    "type": "string",
+                    "description": "Special instructions from customer in Spanish (optional). Must comply with hotel policy and system instructions."
+                }
+            },
+            "required": [
+                "customer_name", "email", "phone_number", "city", "dui_passport", "nationality",
+                "check_in_date", "check_out_date", "room_bookings",
+                "package_type", "payment_method", "payment_amount", "payment_maker_name", "wa_id"
+            ]
         }
     },
     {
@@ -841,7 +993,7 @@ tools = [
             "properties": {
                 "phone_number": {
                     "type": "string",
-                    "description": "Customer's phone number"
+                    "description": "Customer's phone number (wa_id). REQUIRED - cannot be empty or 'AUTO'. Use the customer's actual wa_id from the conversation."
                 },
                 "authorization_number": {
                     "type": "string",
@@ -1394,6 +1546,7 @@ available_functions = {
     "check_office_status": office_status_tool.check_office_status,
     "transfer_to_human_agent": transfer_to_human_agent_wrapper,
     "check_room_availability": database_client.check_room_availability,
+    "check_room_availability_counts": database_client.check_room_availability_counts,
     "check_smart_availability": smart_availability.check_smart_availability,
     "send_bungalow_pictures": send_bungalow_pictures,
     "send_public_areas_pictures": send_public_areas_pictures,
@@ -1408,6 +1561,7 @@ available_functions = {
     "handle_customer_transferencia_type_response": bank_transfer_retry.handle_customer_transferencia_type_response,
     "trigger_compraclick_retry_for_missing_payment": compraclick_tool.trigger_compraclick_retry_for_missing_payment,
     "make_booking": booking_tool.make_booking,
+    "make_multi_room_booking": booking_tool.make_multi_room_booking,
     "send_email": email_service.send_email,
     "notify_operations_department": operations_tool.notify_operations_department,
     "load_additional_modules": load_additional_modules,
@@ -1631,7 +1785,30 @@ async def get_openai_response(
         "❌ 'Nuestro sistema validará' → ✅ Call validate_bank_transfer NOW, you ARE the system.\n"
         "❌ Inventing policies about meals/check-in → ✅ Load MODULE_2A, use EXACT scripts.\n"
         "❌ Ending turn after sync_bank_transfers → ✅ Continue to validate_bank_transfer immediately.\n"
-        "</forbidden_with_alternatives>"
+        "</forbidden_with_alternatives>\n\n"
+        
+        "<compraclick_fallback_rule>\n"
+        "🚨 COMPRACLICK WITHOUT AUTHORIZATION CODE:\n"
+        "When OCR detects card charge to 'LAS HOJAS RESORT' with amount and date but NO authorization code:\n"
+        "1. ASK: '¿Podría proporcionarme los últimos 4 dígitos de la tarjeta con la que realizó el pago?'\n"
+        "2. Once you have card_last_four + amount + date → call validate_compraclick_payment_fallback\n"
+        "3. Do NOT tell customer to wait or that payment is 'retenido' without FIRST trying fallback validation\n"
+        "Example: OCR shows '$474.00, 11/12/2025, LAS HOJAS RESORT BP' but no auth → ASK for last 4 digits → validate_compraclick_payment_fallback\n"
+        "</compraclick_fallback_rule>\n\n"
+        
+        "<multi_room_count_verification>\n"
+        "🚨🚨🚨 CRITICAL FOR MULTI-ROOM BOOKINGS (2+ rooms):\n"
+        "BEFORE quoting or accepting payment for multi-room bookings, you MUST use check_room_availability_counts (NOT check_room_availability).\n"
+        "- check_room_availability returns only 'Available' or 'Not Available' - useless for multi-room!\n"
+        "- check_room_availability_counts returns EXACT counts: {bungalow_familiar: 3, bungalow_junior: 2, habitacion: 5}\n"
+        "WORKFLOW:\n"
+        "1. Customer needs multiple rooms (e.g., '10 adults, 3 Junior rooms')\n"
+        "2. Call check_room_availability_counts FIRST\n"
+        "3. If count < rooms needed → TELL CUSTOMER IMMEDIATELY: 'Solo tenemos X disponibles, ustedes necesitan Y'\n"
+        "4. Offer alternatives (different room types, different dates) BEFORE payment\n"
+        "5. NEVER say 'sí hay disponibilidad' and send payment link if count is insufficient!\n"
+        "Example: Customer needs 3 Junior, check_room_availability_counts shows bungalow_junior=2 → DO NOT quote or send payment link. Inform: 'Solo tenemos 2 Junior disponibles. ¿Prefieren combinar con Habitación o buscar otra fecha?'\n"
+        "</multi_room_count_verification>"
     )
 
     # Check for PENDING bookings that need processing
@@ -1928,13 +2105,10 @@ async def get_openai_response(
                         }],
                         max_output_tokens=16
                     )
-                    # Extract the REAL conversation ID from OpenAI's response
-                    conversation_id = agent_response.conversation_id
-                    save_conversation_id(user_identifier, conversation_id)
-                    logger.info(f"[AGENT_CONTEXT] Agent context injected, OpenAI created conversation {conversation_id}")
-                    
-                    # Save agent context response ID
+                    # Responses API uses previous_response_id for continuation, not conversation_id
+                    # Save agent context response ID for chaining
                     save_response_id(user_identifier, agent_response.id)
+                    logger.info(f"[AGENT_CONTEXT] Agent context injected, response_id={agent_response.id}")
                     
                     logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh recovery conversation)")
                     
@@ -1998,11 +2172,9 @@ async def get_openai_response(
                         max_output_tokens=4000
                     )
                     
-                    # Extract the REAL conversation ID from OpenAI's response
-                    conversation_id = response.conversation_id
-                    save_conversation_id(user_identifier, conversation_id)
+                    # Responses API uses previous_response_id for continuation, not conversation_id
                     save_response_id(user_identifier, response.id)
-                    logger.info(f"[OpenAI] Successfully started fresh conversation {conversation_id}")
+                    logger.info(f"[OpenAI] Successfully started fresh conversation, response_id={response.id}")
             else:
                 # Re-raise if not a tool call error
                 raise
@@ -2299,14 +2471,43 @@ async def get_openai_response(
         # After all tool rounds complete, check response quality
         final_response = _extract_text_from_output(getattr(response, "output", [])) or ""
         
-        # Check if send_menu_pdf or send_menu_prices was called - if so, suppress duplicate final response
-        # The caption parameter already contains the complete message to the user
+        # Check if send_menu_pdf or send_menu_prices was called - if so, check if there are other questions to answer
+        # The caption parameter already contains the complete message for the menu request
         menu_pdf_called = any(fn_name == "send_menu_pdf" for fn_name, _ in all_tool_outputs)
         menu_prices_called = any(fn_name == "send_menu_prices" for fn_name, _ in all_tool_outputs)
         if menu_pdf_called or menu_prices_called:
             tool_name = "send_menu_pdf" if menu_pdf_called else "send_menu_prices"
-            logger.info(f"[MENU_PDF] {tool_name} was called with caption - suppressing duplicate final response")
-            return "", conversation_id  # Return empty string to prevent duplicate message
+            
+            # Check if message contains OTHER questions beyond menu request
+            # Split by newlines and look for questions not about menu
+            message_lines = message.lower().split('\n')
+            menu_keywords = ['menu', 'menú', 'pdf', 'carta']
+            other_questions = [line for line in message_lines if line.strip() and not any(kw in line for kw in menu_keywords)]
+            
+            if not other_questions:
+                # Only menu request - safe to suppress
+                logger.info(f"[MENU_PDF] {tool_name} was called with caption - suppressing duplicate final response (no other questions)")
+                return "", conversation_id
+            else:
+                # There are other questions! Make synthesis call to answer them
+                logger.info(f"[MENU_PDF] {tool_name} was called BUT message contains other questions: {other_questions[:2]}... Making synthesis call.")
+                previous_resp_id = response.id
+                response = await openai_client.responses.create(
+                    model="gpt-5.1",
+                    previous_response_id=previous_resp_id,
+                    input=[
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [{"type": "input_text", 
+                                       "text": f"You already sent the menu PDF. Now please answer the customer's OTHER question(s) that weren't about the menu: '{' | '.join(other_questions)}'. Respond in Spanish."}]
+                        }
+                    ],
+                    max_output_tokens=4000
+                )
+                save_response_id(user_identifier, response.id)
+                final_response = _extract_text_from_output(getattr(response, "output", [])) or ""
+                logger.info(f"[MENU_PDF] Synthesis call answered other questions: {final_response[:100]}...")
         
         # ONLY do synthesis call if response seems incomplete or error-like
         # Skip synthesis for friendly_goodbye responses

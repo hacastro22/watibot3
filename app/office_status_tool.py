@@ -260,19 +260,26 @@ def _is_in_automation_window(current_time: datetime) -> Tuple[bool, str]:
     # Check day of week and time
     weekday = current_time.weekday()  # 0 = Monday, 6 = Sunday
     hour = current_time.hour
+    minute = current_time.minute
     
     if weekday == 6:  # Sunday
         return True, "Sunday - automation allowed all day"
     elif weekday == 5:  # Saturday
-        if hour >= 13 or hour < 8:  # 1:00 PM - 8:00 AM next day
-            return True, "Saturday automation hours: 1:00 PM - 8:00 AM"
+        # Human required 9:10 AM - 1:00 PM, automation allowed rest of day
+        if hour >= 13:  # 1:00 PM onwards
+            return True, "Saturday automation hours: after 1:00 PM"
+        elif hour < 9 or (hour == 9 and minute < 10):  # Before 9:10 AM
+            return True, "Saturday automation hours: before 9:10 AM"
         else:
-            return False, "Saturday business hours: 8:00 AM - 1:00 PM requires human agent"
+            return False, "Saturday business hours: 9:10 AM - 1:00 PM requires human agent"
     else:  # Monday-Friday
-        if hour >= 17 or hour < 8:  # 5:00 PM - 8:00 AM next day
-            return True, "Weekday automation hours: 5:00 PM - 8:00 AM"
+        # Human required 8:10 AM - 5:00 PM, automation allowed rest of day
+        if hour >= 17:  # 5:00 PM onwards
+            return True, "Weekday automation hours: after 5:00 PM"
+        elif hour < 8 or (hour == 8 and minute < 10):  # Before 8:10 AM
+            return True, "Weekday automation hours: before 8:10 AM"
         else:
-            return False, "Weekday business hours: 8:00 AM - 5:00 PM requires human agent"
+            return False, "Weekday business hours: 8:10 AM - 5:00 PM requires human agent"
 
 def _get_office_database_connection() -> mysql.connector.MySQLConnection:
     """
@@ -303,7 +310,8 @@ def _get_office_database_connection() -> mysql.connector.MySQLConnection:
                 user=os.getenv('OFFICE_DB_USER', ''),
                 password=os.getenv('OFFICE_DB_PASSWORD', ''),
                 charset='utf8',
-                autocommit=True
+                autocommit=True,
+                connection_timeout=60
             )
             if attempt > 1:
                 logger.info(f"[OFFICE_DB] Successfully connected on attempt #{attempt}")

@@ -569,7 +569,7 @@ async def process_csv_and_insert_to_db(file_path: str) -> dict:
                             row_data = {h: v.strip() if v else '' for h, v in zip(headers, row_values)}
                             
                             # Exactly match JavaScript duplicate detection logic
-                            check_query = """SELECT * FROM bac WHERE date = %s AND reference = %s AND code = %s AND debit = %s AND credit = %s"""
+                            check_query = """SELECT 1 FROM bac WHERE date = %s AND reference = %s AND code = %s AND debit = %s AND credit = %s LIMIT 1"""
                             cursor.execute(check_query, (row_data['date'], row_data['reference'], row_data['code'], row_data['debit'], row_data['credit']))
                             
                             if cursor.fetchone():
@@ -624,7 +624,7 @@ def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: f
     Returns:
         A dictionary with the validation result including transfer_id for reservation.
     """
-    # 🚨 VALIDATION: Check for illogical future dates
+    # 🚨 VALIDATION: Check for invalid or illogical dates BEFORE entering retry loop
     try:
         from datetime import datetime as dt
         slip_date_obj = dt.strptime(slip_date, "%Y-%m-%d")
@@ -634,10 +634,16 @@ def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: f
             return {
                 "success": False, 
                 "error": "future_date",
-                "message": f"🚨 FECHA ILÓGICA: La fecha del comprobante ({slip_date}) está en el futuro. Esto es imposible para una transferencia ya realizada. Por favor: (1) Re-analice el comprobante con analyze_payment_proof, o (2) Pregunte al cliente la fecha REAL de la transferencia."
+                "message": f"🚨 FECHA ILÓGICA: La fecha del comprobante ({slip_date}) está en el futuro. Esto es imposible para una transferencia ya realizada. ACCIÓN REQUERIDA: (1) Primero intente re-analizar el comprobante con analyze_payment_proof (el OCR probablemente leyó mal el año), (2) Si aún sale incorrecta, pregunte al cliente: '¿En qué fecha realizó la transferencia?' (ejemplo: 13/12/2025)"
             }
     except ValueError as e:
-        logger.warning(f"Could not parse slip_date {slip_date}: {e}")
+        # 🚨 CRITICAL: Return error immediately for invalid date format - do NOT proceed to infinite retry loop
+        logger.error(f"INVALID DATE FORMAT: slip_date '{slip_date}' is not a valid date: {e}")
+        return {
+            "success": False,
+            "error": "invalid_date_format",
+            "message": f"🚨 FECHA NO DETECTADA: No se pudo extraer la fecha del comprobante (valor recibido: '{slip_date}'). ACCIÓN REQUERIDA: (1) Primero intente re-analizar el comprobante con analyze_payment_proof para ver si el OCR puede detectar la fecha, (2) Si aún no se detecta, pregunte al cliente: '¿En qué fecha realizó la transferencia?' (ejemplo: 13/12/2025)"
+        }
     
     logger.info(f"Attempting to validate booking of {booking_amount} using slip for {slip_amount} on {slip_date}")
     

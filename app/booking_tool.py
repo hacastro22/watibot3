@@ -38,6 +38,18 @@ EL_SALVADOR_TZ = timezone('America/El_Salvador')
 # El Salvador holidays
 EL_SALVADOR_HOLIDAYS = holidays.country_holidays('SV')
 
+# Room capacity constraints - ALIGNED WITH system_instructions_new.txt (line 1300-1302)
+# Format: {"min_occupancy": X, "max_occupancy": Y}
+# Occupancy formula: adults + (children_6_10 * 0.5). Children 0-5 = 0
+# NOTE: "Doble" is normalized to "Habitación" by _normalize_bungalow_type(), so no separate entry needed
+ROOM_CAPACITY = {
+    "Familiar": {"min_occupancy": 5, "max_occupancy": 8},    # Rooms 1-17
+    "Junior": {"min_occupancy": 2, "max_occupancy": 8},      # Rooms 18-59
+    "Habitación": {"min_occupancy": 2, "max_occupancy": 4},  # Rooms 1A-14A (also called "Doble")
+    "Matrimonial": {"min_occupancy": 2, "max_occupancy": 2}, # Junior subset: 22,42,47,48,53
+    "Pasadía": {"min_occupancy": 0, "max_occupancy": 999}    # No room capacity for day pass
+}
+
 # Booking lock to prevent duplicate bookings from concurrent requests
 _booking_locks = {}  # Per-customer locks
 _booking_locks_mutex = threading.Lock()  # Protects the locks dictionary
@@ -52,9 +64,9 @@ def _get_booking_lock(wa_id: str) -> threading.Lock:
             _booking_locks[wa_id] = threading.Lock()
         return _booking_locks[wa_id]
 
-def _check_and_mark_authorization(auth_code: str, wa_id: str) -> tuple:
+def _check_authorization_duplicate(auth_code: str, wa_id: str) -> tuple:
     """
-    Check if authorization code was recently used and mark it if not.
+    Check if authorization code was recently used (does NOT mark as used).
     Returns (is_duplicate, message).
     """
     if not auth_code:
@@ -77,10 +89,23 @@ def _check_and_mark_authorization(auth_code: str, wa_id: str) -> tuple:
             logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Authorization {auth_code} was used {age_seconds:.0f}s ago for {prev_wa_id}")
             return True, f"Authorization code {auth_code} was already used for a booking"
         
-        # Mark as used
+        return False, ""
+
+
+def _mark_authorization_used(auth_code: str, wa_id: str) -> None:
+    """
+    Mark authorization code as used AFTER successful booking.
+    Should only be called after booking is confirmed successful.
+    """
+    if not auth_code:
+        return
+    
+    auth_key = auth_code.strip().upper()
+    current_time = time.time()
+    
+    with _used_authorizations_mutex:
         _used_authorizations[auth_key] = (wa_id, current_time)
         logger.info(f"[DUPLICATE_BOOKING_PREVENTION] Marked authorization {auth_code} as used for {wa_id}")
-        return False, ""
 
 # Shared Normalization and Assistant Classification Functions
 
@@ -187,13 +212,660 @@ def _normalize_bungalow_type(bungalow_type: str) -> dict:
         return {"success": True, "type": "Familiar"}
     elif any(keyword in bungalow_type_lower for keyword in ['matrimonial', 'matrimonio', 'matrimonial', 'matri', 'couple']):
         return {"success": True, "type": "Matrimonial"}
-    elif any(keyword in bungalow_type_lower for keyword in ['habitacion', 'habitación', 'room', 'hab']):
+    elif any(keyword in bungalow_type_lower for keyword in ['habitacion', 'habitación', 'room', 'hab', 'doble']):
         return {"success": True, "type": "Habitación"}
     elif any(keyword in bungalow_type_lower for keyword in ['pasadia', 'pasadía', 'day']):
         return {"success": True, "type": "Pasadía"}
     else:
         # Normalization failed - return original input for assistant classification
         return {"success": False, "original_input": bungalow_type}
+
+
+def _validate_room_capacity(
+    bungalow_type: str,
+    adults: int,
+    children_0_5: int,
+    children_6_10: int
+) -> Dict[str, Any]:
+    """
+    Validate that guest count meets room capacity constraints.
+    
+    Uses existing _normalize_bungalow_type() for robustness.
+    
+    Occupancy formula (from system_instructions_new.txt line 1300):
+    occupancy_score = (adults × 1) + (children_6_10 × 0.5)
+    NOTE: Children 0-5 count as 0 (not 0.5)!
+    
+    Args:
+        bungalow_type: Type of room (will be normalized)
+        adults: Number of adults (count as 1 each)
+        children_0_5: Children 0-5 years (count as 0 - don't affect occupancy)
+        children_6_10: Children 6-10 years (count as 0.5 each)
+    
+    Returns:
+        {
+            "valid": True/False,
+            "occupancy_score": float,
+            "min_occupancy": int,
+            "max_occupancy": int,
+            "error": "..." if invalid,
+            "suggestion": "..." room type suggestion if invalid
+        }
+    """
+    # Use existing normalization function for robustness
+    norm_result = _normalize_bungalow_type(bungalow_type)
+    if norm_result["success"]:
+        normalized_type = norm_result["type"]
+    else:
+        normalized_type = bungalow_type  # Fallback to original
+    
+    capacity = ROOM_CAPACITY.get(normalized_type)
+    if not capacity:
+        return {"valid": False, "error": f"Unknown room type: {bungalow_type}"}
+    
+    # Calculate occupancy score - children_0_5 count as 0!
+    occupancy_score = adults + (children_6_10 * 0.5)
+    
+    # Check MINIMUM occupancy (too few people)
+    if occupancy_score < capacity["min_occupancy"]:
+        suggestion = _suggest_room_for_group(adults, children_0_5, children_6_10)
+        return {
+            "valid": False,
+            "occupancy_score": occupancy_score,
+            "min_occupancy": capacity["min_occupancy"],
+            "max_occupancy": capacity["max_occupancy"],
+            "error": f"{bungalow_type} requires min {capacity['min_occupancy']} occupancy, got {occupancy_score}",
+            "suggestion": suggestion
+        }
+    
+    # Check MAXIMUM occupancy (too many people)
+    if occupancy_score > capacity["max_occupancy"]:
+        suggestion = _suggest_room_for_group(adults, children_0_5, children_6_10)
+        return {
+            "valid": False,
+            "occupancy_score": occupancy_score,
+            "min_occupancy": capacity["min_occupancy"],
+            "max_occupancy": capacity["max_occupancy"],
+            "error": f"{bungalow_type} max occupancy {capacity['max_occupancy']}, got {occupancy_score}",
+            "suggestion": suggestion
+        }
+    
+    return {
+        "valid": True,
+        "occupancy_score": occupancy_score,
+        "min_occupancy": capacity["min_occupancy"],
+        "max_occupancy": capacity["max_occupancy"]
+    }
+
+
+def _suggest_room_for_group(adults: int, children_0_5: int, children_6_10: int) -> str:
+    """
+    Suggest appropriate room type(s) for group size.
+    Uses same occupancy formula: adults + (children_6_10 * 0.5)
+    """
+    occupancy = adults + (children_6_10 * 0.5)
+    
+    if occupancy <= 2:
+        return "Junior, Habitación, o Matrimonial"
+    elif occupancy <= 4:
+        return "Junior o Habitación"
+    elif occupancy <= 8:
+        if occupancy >= 5:
+            return "Familiar o Junior"  # Both valid for 5-8
+        else:
+            return "Junior"  # 4.5 or less, only Junior valid
+    else:
+        # Need multiple rooms (occupancy > 8)
+        rooms_needed = -(-int(occupancy) // 8)  # Ceiling division by max Junior capacity
+        return f"Se necesitan {rooms_needed} habitaciones para {int(occupancy)} personas"
+
+
+async def _get_multiple_rooms(
+    check_in_date: str,
+    check_out_date: str,
+    room_requests: List[Dict[str, Any]],
+    package_type: str = "Las Hojas"
+) -> Dict[str, Any]:
+    """
+    Get available rooms for a multi-room booking request.
+    
+    IMPORTANT: Uses ONE API call to get ALL available rooms, then selects
+    from that pool. This is efficient and matches how _check_room_availability() works.
+    
+    Args:
+        check_in_date: Check-in date (YYYY-MM-DD)
+        check_out_date: Check-out date (YYYY-MM-DD)
+        room_requests: List of room requests, each with:
+            - bungalow_type: Type of room
+            - adults: Number of adults
+            - children_0_5: Children 0-5 years
+            - children_6_10: Children 6-10 years
+        package_type: Package type for all rooms (Las Hojas, Escapadita, Romántico)
+    
+    Returns:
+        {
+            "success": True/False,
+            "rooms": ["24", "25", "26", "27"],  # Selected room numbers
+            "room_details": [
+                {"room": "24", "type": "Junior", "adults": 2, ...},
+                ...
+            ],
+            "error": "..." if failed
+        }
+    """
+    
+    # STEP 1: Validate capacity for ALL rooms FIRST (no API call needed)
+    for i, request in enumerate(room_requests):
+        bungalow_type = request["bungalow_type"]
+        adults = request["adults"]
+        children_0_5 = request.get("children_0_5", 0)
+        children_6_10 = request.get("children_6_10", 0)
+        
+        # _validate_room_capacity already uses _normalize_bungalow_type internally (Phase 0)
+        capacity_result = _validate_room_capacity(bungalow_type, adults, children_0_5, children_6_10)
+        if not capacity_result["valid"]:
+            return {
+                "success": False,
+                "error": f"Room {i+1} ({bungalow_type}): {capacity_result['error']}",
+                "suggestion": capacity_result.get("suggestion"),
+                "customer_message": f"La habitación {i+1} ({bungalow_type}) no tiene capacidad para {adults} adultos. {capacity_result.get('suggestion', '')}"
+            }
+    
+    # STEP 2: Get ALL available rooms with ONE API call
+    # The API returns ALL rooms: {"info": {"1": "24", "2": "25", "3": "1", ...}}
+    availability = await _check_room_availability(check_in_date, check_out_date)
+    
+    if not availability.get("success"):
+        return {
+            "success": False,
+            "error": "Failed to check room availability",
+            "customer_message": "Error al verificar disponibilidad de habitaciones."
+        }
+    
+    all_available_rooms = availability["rooms"]  # {"1": "24", "2": "25", ...}
+    logger.info(f"[MULTI_ROOM] All available rooms: {all_available_rooms}")
+    
+    # STEP 3: Select rooms for each request from the pool
+    selected_rooms = []
+    room_details = []
+    excluded = []  # Track already-selected rooms to prevent duplicates
+    
+    for i, request in enumerate(room_requests):
+        bungalow_type = request["bungalow_type"]
+        
+        # Normalize bungalow_type for _select_room (handles "bungalow familiar" -> "Familiar", etc.)
+        norm_result = _normalize_bungalow_type(bungalow_type)
+        normalized_type = norm_result["type"] if norm_result["success"] else bungalow_type
+        
+        # Select a room of this type (excluding already-selected ones)
+        selected = _select_room(
+            all_available_rooms, 
+            normalized_type,
+            package_type,
+            excluded_rooms=excluded
+        )
+        
+        if not selected:
+            # 🚨 FALLBACK: Calculate single-room and alternative multi-room options
+            total_adults = sum(r.get("adults", 0) for r in room_requests)
+            total_children_6_10 = sum(r.get("children_6_10", 0) for r in room_requests)
+            total_occupancy = total_adults + (total_children_6_10 * 0.5)
+            
+            capacity_rules = {
+                'bungalow_familiar': (5, 8),
+                'bungalow_junior': (2, 8),
+                'habitacion': (2, 4),
+            }
+            type_display_names = {
+                'bungalow_familiar': 'Bungalow Familiar',
+                'bungalow_junior': 'Bungalow Junior',
+                'habitacion': 'Habitación Doble',
+            }
+            
+            # Count available rooms by type
+            room_counts = {'bungalow_familiar': 0, 'bungalow_junior': 0, 'habitacion': 0}
+            for room_idx, room_num in all_available_rooms.items():
+                if room_num == "Pasadía":
+                    continue
+                elif isinstance(room_num, str) and room_num.endswith('A'):
+                    room_counts['habitacion'] += 1
+                else:
+                    try:
+                        num = int(room_num)
+                        if 1 <= num <= 17:
+                            room_counts['bungalow_familiar'] += 1
+                        elif 18 <= num <= 59:
+                            room_counts['bungalow_junior'] += 1
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Check single-room alternatives (if group fits in one room)
+            compatible_single_room = []
+            for room_type, (min_cap, max_cap) in capacity_rules.items():
+                if room_counts.get(room_type, 0) > 0 and min_cap <= total_occupancy <= max_cap:
+                    compatible_single_room.append(type_display_names.get(room_type, room_type))
+            
+            # Check alternative multi-room options
+            compatible_multi_room = []
+            rooms_needed = len(room_requests)
+            for room_type, (min_cap, max_cap) in capacity_rules.items():
+                available_count = room_counts.get(room_type, 0)
+                if available_count >= rooms_needed:
+                    per_room = total_occupancy / rooms_needed
+                    if min_cap <= per_room <= max_cap:
+                        compatible_multi_room.append(f"{rooms_needed}x {type_display_names.get(room_type, room_type)}")
+            
+            logger.info(f"[MULTI_ROOM] Not enough {bungalow_type}. Single-room options: {compatible_single_room}, Multi-room options: {compatible_multi_room}")
+            
+            # Build instruction based on alternatives
+            all_alternatives = compatible_single_room + compatible_multi_room
+            if compatible_single_room:
+                instruction = f"No hay suficientes {bungalow_type} disponibles. Sin embargo, su grupo de {total_adults} adultos{' y ' + str(total_children_6_10) + ' niños' if total_children_6_10 > 0 else ''} SÍ cabe en UNA SOLA habitación: {', '.join(compatible_single_room)}. El precio se recalculará. ¿Desea cambiar o buscar otras fechas?"
+            elif compatible_multi_room:
+                instruction = f"No hay suficientes {bungalow_type} disponibles. Alternativas: {', '.join(compatible_multi_room)}. ¿Desea cambiar o buscar otras fechas?"
+            else:
+                instruction = f"🚨 No hay suficientes {bungalow_type} disponibles y NO HAY ALTERNATIVAS compatibles. DEBES ofrecer: 1) Buscar otras fechas, o 2) Reembolso completo."
+            
+            return {
+                "success": False,
+                "error": f"No available {bungalow_type} rooms (need {len(room_requests) - i} more)",
+                "partial_rooms": selected_rooms,
+                "customer_message": f"No hay suficientes habitaciones {bungalow_type} disponibles.",
+                "compatible_single_room": compatible_single_room,
+                "compatible_multi_room": compatible_multi_room,
+                "total_occupancy": total_occupancy,
+                "group_size": {"adults": total_adults, "children_6_10": total_children_6_10},
+                "assistant_instruction": instruction
+            }
+        
+        selected_rooms.append(selected)
+        excluded.append(selected)
+        room_details.append({
+            "room": selected,
+            "type": bungalow_type,
+            "adults": request["adults"],
+            "children_0_5": request.get("children_0_5", 0),
+            "children_6_10": request.get("children_6_10", 0)
+        })
+        
+        logger.info(f"[MULTI_ROOM] Room {i+1}: Selected {selected} ({bungalow_type})")
+    
+    return {
+        "success": True,
+        "rooms": selected_rooms,
+        "room_details": room_details
+    }
+
+
+async def _revalidate_multi_room_availability(
+    check_in_date: str,
+    check_out_date: str,
+    selected_rooms: List[str],
+    room_bookings: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Re-validate that selected rooms are still available immediately before booking.
+    This prevents race conditions between room selection and API call.
+    
+    Similar to _make_booking_with_revalidation() logic for single bookings.
+    
+    Args:
+        check_in_date: Check-in date (YYYY-MM-DD)
+        check_out_date: Check-out date (YYYY-MM-DD)
+        selected_rooms: Previously selected room numbers ["24", "25", "26"]
+        room_bookings: Original room requests for reference
+    
+    Returns:
+        {
+            "success": True/False,
+            "unavailable_rooms": ["24"] if any became unavailable,
+            "error": "..." if failed
+        }
+    """
+    unavailable_rooms = []
+    
+    # Get current availability
+    availability_result = await _check_room_availability(check_in_date, check_out_date)
+    
+    if not availability_result["success"]:
+        return {
+            "success": False,
+            "error": "Failed to check current availability",
+            "unavailable_rooms": selected_rooms
+        }
+    
+    # Check if all selected rooms are still available
+    # .values() returns room numbers like "24", "25", "1A", etc.
+    current_available = set(str(v) for v in availability_result["rooms"].values())
+    
+    for room in selected_rooms:
+        # Convert to string for consistent comparison
+        room_str = str(room)
+        if room_str not in current_available:
+            unavailable_rooms.append(room)
+    
+    if unavailable_rooms:
+        logger.warning(f"[MULTI_ROOM] Rooms became unavailable: {unavailable_rooms}")
+        return {
+            "success": False,
+            "error": f"Rooms {unavailable_rooms} no longer available",
+            "unavailable_rooms": unavailable_rooms
+        }
+    
+    return {
+        "success": True,
+        "unavailable_rooms": []
+    }
+
+
+async def make_multi_room_booking(
+    customer_name: str,
+    email: str,
+    phone_number: str,
+    city: str,
+    dui_passport: str,
+    nationality: str,
+    check_in_date: str,
+    check_out_date: str,
+    room_bookings: List[Dict[str, Any]],
+    package_type: str,
+    payment_method: str,
+    payment_amount: float,
+    payment_maker_name: str,
+    wa_id: str,
+    authorization_number: str = None,
+    transfer_id: str = None,
+    extra_beds: int = 0,
+    extra_beds_cost: float = 0.0,
+    customer_instructions: str = None
+) -> dict:
+    """
+    Process a multi-room booking using native API multi-room support.
+    
+    The API accepts:
+    - reserverooms: "24+25+26+27" (rooms joined by +)
+    - adultcount: "2+3+2+4" (PAX per room joined by +)
+    
+    This is a SINGLE atomic transaction - all rooms succeed or all fail.
+    
+    NOTE: Time validation is handled by assistant via check_office_status()
+    BEFORE calling this function (same as single booking).
+    
+    Args:
+        customer_name: Full name of primary guest
+        email: Customer email
+        phone_number: Customer phone (or extracted from wa_id)
+        city: City of residence
+        dui_passport: DUI or passport number
+        nationality: Customer nationality
+        check_in_date: Check-in date (YYYY-MM-DD)
+        check_out_date: Check-out date (YYYY-MM-DD)
+        room_bookings: List of room configurations, each with:
+            - bungalow_type: "Junior", "Familiar", "Matrimonial", "Habitación"
+            - adults: Number of adults
+            - children_0_5: Children 0-5 years
+            - children_6_10: Children 6-10 years
+        package_type: Las Hojas, Escapadita, Romántico
+        payment_method: CompraClick or Depósito BAC
+        payment_amount: Total payment amount
+        payment_maker_name: Name on payment
+        wa_id: WhatsApp ID or subscriber ID
+        authorization_number: CompraClick auth code
+        transfer_id: Bank transfer ID
+        extra_beds: Number of extra beds
+        extra_beds_cost: Cost for extra beds
+        customer_instructions: Special instructions
+    
+    Returns:
+        {
+            "success": True/False,
+            "reserva": "HR12345" or list of codes,
+            "rooms_booked": ["24", "25", "26", "27"],
+            "total_rooms": 4,
+            "customer_message": "...",
+            "error": "..." if failed
+        }
+    """
+    logger.info(f"[MULTI_ROOM] Starting multi-room booking for {customer_name}, {len(room_bookings)} rooms")
+    
+    # 🚨 CRITICAL: Block CompraClick bookings without authorization_number to prevent duplicates
+    if payment_method == "CompraClick" and not authorization_number:
+        logger.error(f"[MULTI_ROOM] BLOCKED: CompraClick booking without authorization_number for {wa_id}")
+        return {
+            "success": False,
+            "error": "authorization_number parameter is required for CompraClick payments"
+        }
+    
+    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used (don't mark yet)
+    payment_ref = authorization_number or transfer_id
+    if payment_ref:
+        is_duplicate, dup_message = _check_authorization_duplicate(payment_ref, wa_id)
+        if is_duplicate:
+            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Blocking duplicate multi-room booking for {wa_id} with payment ref {payment_ref}")
+            return {
+                "success": True,
+                "already_booked": True,
+                "customer_message": "Esta reserva ya fue procesada anteriormente. Si necesita verificar su reservación, por favor indíquenos."
+            }
+    
+    # Extract phone number from wa_id if not provided (same as make_booking)
+    if not phone_number or phone_number.strip() == '':
+        phone_number = _extract_phone_from_wa_id(wa_id)
+        logger.info(f"[MULTI_ROOM] Phone number extracted from wa_id {wa_id}: {phone_number}")
+    
+    try:
+        # NOTE: Time validation is handled by assistant via check_office_status()
+        # before calling this function. This matches the pattern in make_booking().
+        current_time = datetime.now(EL_SALVADOR_TZ)
+        logger.debug(f"[MULTI_ROOM] Current El Salvador time: {current_time}")
+        
+        # Step 0: Validate customer info (including placeholder detection)
+        placeholder_values = [
+            "pendiente", "por_definir", "por definir", "tbd", "auto", 
+            "n/a", "na", "ninguno", "none", "unknown", "desconocido",
+            "huésped", "huesped", "cliente", "usuario", "guest"
+        ]
+        def _is_placeholder(value: str) -> bool:
+            if not value:
+                return True
+            return value.strip().lower() in placeholder_values
+        
+        # Check for missing or placeholder values
+        missing_fields = []
+        if not customer_name or len(customer_name.strip().split()) < 2 or _is_placeholder(customer_name):
+            missing_fields.append("nombre completo (nombre y apellido)")
+        if not email or "@" not in email or _is_placeholder(email):
+            missing_fields.append("correo electrónico válido")
+        if not city or _is_placeholder(city):
+            missing_fields.append("ciudad de residencia")
+        if not dui_passport or _is_placeholder(dui_passport):
+            missing_fields.append("número de DUI o pasaporte")
+        if not nationality or _is_placeholder(nationality):
+            missing_fields.append("nacionalidad")
+        if not payment_maker_name or _is_placeholder(payment_maker_name):
+            missing_fields.append("nombre del titular del pago")
+        
+        if missing_fields:
+            missing_list = ", ".join(missing_fields)
+            logger.warning(f"[MULTI_ROOM] Missing required fields (incl. placeholders): {missing_list}")
+            return {
+                "success": False,
+                "error": "missing_customer_data",
+                "missing_fields": missing_fields,
+                "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY",
+                "customer_message": f"Para completar su reserva, necesitamos los siguientes datos: {missing_list}. ¿Podría proporcionárnoslos?"
+            }
+        
+        # Validate dates
+        try:
+            check_in = datetime.strptime(check_in_date, "%Y-%m-%d")
+            check_out = datetime.strptime(check_out_date, "%Y-%m-%d")
+            if check_out <= check_in:
+                return {
+                    "success": False,
+                    "error": "Check-out date must be after check-in date",
+                    "customer_message": "La fecha de salida debe ser posterior a la fecha de entrada."
+                }
+        except ValueError:
+            return {
+                "success": False,
+                "error": "Invalid date format",
+                "customer_message": "El formato de las fechas no es válido. Use el formato YYYY-MM-DD."
+            }
+        
+        # Step 1: Get available rooms for each request (includes capacity validation)
+        room_result = await _get_multiple_rooms(
+            check_in_date, check_out_date, room_bookings, package_type
+        )
+        
+        if not room_result["success"]:
+            return {
+                "success": False,
+                "error": room_result["error"],
+                "customer_message": f"Lo sentimos, no hay suficientes habitaciones disponibles: {room_result['error']}"
+            }
+        
+        selected_rooms = room_result["rooms"]
+        room_details = room_result["room_details"]
+        
+        # Step 2: Reserve payment (full amount for all rooms)
+        if payment_method == "Depósito BAC" and transfer_id:
+            from .bank_transfer_tool import reserve_bank_transfer
+            reserve_result = reserve_bank_transfer(int(transfer_id), payment_amount)
+            if not reserve_result.get("success"):
+                return {
+                    "success": False,
+                    "error": "Payment reservation failed",
+                    "customer_message": reserve_result.get("message", "Error al reservar el pago.")
+                }
+            logger.info(f"[MULTI_ROOM] Bank transfer reservation successful for transfer ID {transfer_id}")
+        elif payment_method == "CompraClick" and authorization_number:
+            from .compraclick_tool import reserve_compraclick_payment
+            reserve_result = await reserve_compraclick_payment(authorization_number, payment_amount)
+            if not reserve_result.get("success"):
+                return {
+                    "success": False,
+                    "error": "CompraClick reservation failed",
+                    "customer_message": "Error al procesar el pago CompraClick."
+                }
+            logger.info(f"[MULTI_ROOM] CompraClick reservation successful for auth '{authorization_number}'")
+        
+        # Step 3: RE-VALIDATE availability immediately before booking
+        revalidation_result = await _revalidate_multi_room_availability(
+            check_in_date, check_out_date, selected_rooms, room_bookings
+        )
+        
+        if not revalidation_result["success"]:
+            logger.warning(f"[MULTI_ROOM] Re-validation failed: {revalidation_result['error']}")
+            retry_result = await _get_multiple_rooms(check_in_date, check_out_date, room_bookings, package_type)
+            if not retry_result["success"]:
+                return {
+                    "success": False,
+                    "error": "Rooms became unavailable during booking",
+                    "customer_message": "Lo sentimos, algunas habitaciones ya no están disponibles."
+                }
+            selected_rooms = retry_result["rooms"]
+            room_details = retry_result["room_details"]
+        
+        # Step 4: Format API parameters
+        reserverooms = "+".join(str(r) for r in selected_rooms)
+        adult_counts = [str(r["adults"]) for r in room_details]
+        adultcount = "+".join(adult_counts)
+        total_children_0_5 = sum(r["children_0_5"] for r in room_details)
+        total_children_6_10 = sum(r["children_6_10"] for r in room_details)
+        
+        # Step 5: Build accommodation description for mixed-type bookings
+        room_type_counts = {}
+        for r in room_details:
+            t = r["type"]
+            room_type_counts[t] = room_type_counts.get(t, 0) + 1
+        
+        # Format: "2x Junior, 1x Familiar" or just "Junior" if all same type
+        if len(room_type_counts) == 1:
+            primary_bungalow_type = list(room_type_counts.keys())[0]
+        else:
+            primary_bungalow_type = ", ".join(f"{count}x {t}" for t, count in room_type_counts.items())
+        
+        # Step 6: Make API call
+        booking_result = await _make_multi_room_api_call(
+            customer_name=customer_name,
+            email=email,
+            phone_number=phone_number,
+            city=city,
+            dui_passport=dui_passport,
+            nationality=nationality,
+            check_in_date=check_in_date,
+            check_out_date=check_out_date,
+            reserverooms=reserverooms,
+            adultcount=adultcount,
+            children_0_5=total_children_0_5,
+            children_6_10=total_children_6_10,
+            bungalow_type=primary_bungalow_type,
+            package_type=package_type,
+            payment_method=payment_method,
+            payment_amount=payment_amount,
+            payment_maker_name=payment_maker_name,
+            wa_id=wa_id,
+            authorization_number=authorization_number,
+            transfer_id=transfer_id,
+            extra_beds=extra_beds,
+            extra_beds_cost=extra_beds_cost,
+            customer_instructions=customer_instructions,
+            room_count=len(selected_rooms)
+        )
+        
+        if not booking_result["success"]:
+            return {
+                "success": False,
+                "error": booking_result.get("error"),
+                "customer_message": f"Error al procesar la reserva: {booking_result.get('error', 'Error desconocido')}"
+            }
+        
+        # Step 7: Update payment record
+        reserva = booking_result.get("reserva", "unknown")
+        try:
+            await _update_payment_record(payment_method, authorization_number, transfer_id, reserva)
+            logger.info(f"[MULTI_ROOM] Payment record updated for reserva {reserva}")
+        except Exception as e:
+            logger.error(f"[MULTI_ROOM] Payment record update failed: {e}")
+        
+        # Step 8: Success response
+        total_adults = sum(r["adults"] for r in room_details)
+        total_children = total_children_0_5 + total_children_6_10
+        
+        logger.info(f"[MULTI_ROOM] Booking successful, reserva: {reserva}")
+        
+        # DUPLICATE BOOKING PREVENTION: Mark auth as used ONLY after successful booking
+        if payment_ref:
+            _mark_authorization_used(payment_ref, wa_id)
+        
+        return {
+            "success": True,
+            "reserva": reserva,
+            "rooms_booked": selected_rooms,
+            "total_rooms": len(selected_rooms),
+            "customer_message": f"""¡Excelente! Su reserva de {len(selected_rooms)} habitaciones ha sido confirmada exitosamente. 🎉
+
+📋 **Detalles de la Reserva:**
+• Código: {reserva}
+• Habitaciones: {', '.join(str(r) for r in selected_rooms)}
+• Check-in: {check_in_date}
+• Check-out: {check_out_date}
+• Huéspedes: {total_adults} adultos{f', {total_children} niños' if total_children > 0 else ''}
+• Paquete: {package_type}
+• Total pagado: ${payment_amount:.2f}
+
+Los detalles han sido enviados a su correo electrónico. ¡Esperamos verle pronto en Las Hojas Resort! 🌴"""
+        }
+    
+    except Exception as e:
+        logger.error(f"[MULTI_ROOM] Unexpected error: {e}")
+        return {
+            "success": False,
+            "error": f"Unexpected error: {e}",
+            "customer_message": "Hubo un error al procesar su reserva. Por favor contacte a soporte."
+        }
+
 
 async def _get_openai_thread_id(wa_id: str) -> Optional[str]:
     """
@@ -393,10 +1065,18 @@ async def make_booking(
     # Log booking attempt (internal only)
     logger.info(f"Booking attempt started for customer: {customer_name}, dates: {check_in_date} to {check_out_date}")
     
-    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used
+    # 🚨 CRITICAL: Block CompraClick bookings without authorization_number to prevent duplicates
+    if payment_method == "CompraClick" and not authorization_number:
+        logger.error(f"[PAYMENT_VALIDATION] BLOCKED: CompraClick booking without authorization_number for {wa_id}")
+        return {
+            "success": False,
+            "error": "authorization_number parameter is required for CompraClick payments"
+        }
+    
+    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used (don't mark yet)
     payment_ref = authorization_number or transfer_id
     if payment_ref:
-        is_duplicate, dup_message = _check_and_mark_authorization(payment_ref, wa_id)
+        is_duplicate, dup_message = _check_authorization_duplicate(payment_ref, wa_id)
         if is_duplicate:
             logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Blocking duplicate booking for {wa_id} with payment ref {payment_ref}")
             return {
@@ -451,10 +1131,89 @@ async def make_booking(
         selected_room = _select_room(availability_result["rooms"], bungalow_type, package_type)
         if not selected_room:
             logger.warning(f"No suitable room available for {bungalow_type} - {package_type}")
+            
+            # 🚨 OCCUPANCY-BASED FILTERING: Find single-room AND multi-room alternatives
+            compatible_single_room = []
+            compatible_multi_room = []
+            available_rooms = availability_result.get("rooms", {})
+            
+            # Determine what room types are actually available and count them
+            available_types = set()
+            room_counts = {'bungalow_familiar': 0, 'bungalow_junior': 0, 'habitacion': 0}
+            for room_idx, room_num in available_rooms.items():
+                if room_num == "Pasadía":
+                    continue
+                elif isinstance(room_num, str) and room_num.endswith('A'):
+                    available_types.add('habitacion')
+                    room_counts['habitacion'] += 1
+                else:
+                    try:
+                        num = int(room_num)
+                        if 1 <= num <= 17:
+                            available_types.add('bungalow_familiar')
+                            room_counts['bungalow_familiar'] += 1
+                        elif 18 <= num <= 59:
+                            available_types.add('bungalow_junior')
+                            room_counts['bungalow_junior'] += 1
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Calculate occupancy
+            total_occupancy = adults + (children_6_10 * 0.5)
+            capacity_rules = {
+                'bungalow_familiar': (5, 8),
+                'bungalow_junior': (2, 8),
+                'habitacion': (2, 4),
+            }
+            type_display_names = {
+                'bungalow_familiar': 'Bungalow Familiar',
+                'bungalow_junior': 'Bungalow Junior',
+                'habitacion': 'Habitación Doble',
+            }
+            
+            # Check single-room alternatives
+            for avail_type in available_types:
+                if avail_type in capacity_rules:
+                    min_cap, max_cap = capacity_rules[avail_type]
+                    if min_cap <= total_occupancy <= max_cap:
+                        compatible_single_room.append(type_display_names.get(avail_type, avail_type))
+            
+            # 🚨 MULTI-ROOM ALTERNATIVES: If no single-room fits, check multi-room options
+            if not compatible_single_room and total_occupancy > 0:
+                for room_type, (min_cap, max_cap) in capacity_rules.items():
+                    available_count = room_counts.get(room_type, 0)
+                    if available_count >= 2:
+                        for num_rooms_needed in range(2, min(available_count + 1, 5)):
+                            per_room = total_occupancy / num_rooms_needed
+                            if min_cap <= per_room <= max_cap:
+                                display_name = type_display_names.get(room_type, room_type)
+                                compatible_multi_room.append(f"{num_rooms_needed}x {display_name} ({available_count} disponibles)")
+                                logger.info(f"[ROOM_DEBUG] Multi-room compatible: {num_rooms_needed}x {room_type} (per-room {per_room:.1f})")
+                                break
+            
+            logger.info(f"[ROOM_DEBUG] Available types: {available_types}, Occupancy: {total_occupancy}, Single-room: {compatible_single_room}, Multi-room: {compatible_multi_room}")
+            
+            # Build specific instruction based on available alternatives
+            all_alternatives = compatible_single_room + compatible_multi_room
+            if all_alternatives:
+                if compatible_multi_room and not compatible_single_room:
+                    instruction = f"El tipo {bungalow_type} no está disponible. Su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''} NO cabe en una sola habitación, pero SÍ pueden usar MÚLTIPLES habitaciones: {', '.join(compatible_multi_room)}. El precio se calcula por persona. ¿Desea esta opción o buscar otras fechas?"
+                else:
+                    instruction = f"El tipo {bungalow_type} no está disponible. Alternativas para {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''}: {', '.join(all_alternatives)}. El precio puede variar. ¿Desea cambiar o buscar otras fechas?"
+            else:
+                instruction = f"🚨 El tipo {bungalow_type} no está disponible y NO HAY ALTERNATIVAS (ni single ni multi-room) para su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''}. DEBES ofrecer: 1) Buscar otras fechas con check_smart_availability, o 2) Reembolso completo."
+            
             return {
                 "success": False,
                 "error": "No suitable room available",
-                "customer_message": _get_no_availability_message(check_in_date, check_out_date)
+                "customer_message": _get_no_availability_message(check_in_date, check_out_date),
+                "available_types": list(available_types),
+                "compatible_single_room": compatible_single_room,
+                "compatible_multi_room": compatible_multi_room,
+                "requested_type": bungalow_type,
+                "group_size": {"adults": adults, "children_6_10": children_6_10},
+                "has_compatible_alternatives": len(all_alternatives) > 0,
+                "assistant_instruction": instruction
             }
         
         logger.info(f"Selected room: {selected_room} for {bungalow_type} - {package_type}")
@@ -513,6 +1272,10 @@ async def make_booking(
             }
         
         logger.info(f"Booking successful, reserva: {booking_result['reserva']}")
+        
+        # DUPLICATE BOOKING PREVENTION: Mark auth as used ONLY after successful booking
+        if payment_ref:
+            _mark_authorization_used(payment_ref, wa_id)
         
         # Internal Chain of Thought: Update payment record in database
         try:
@@ -577,14 +1340,6 @@ def _calculate_booking_total(
         }
     """
     try:
-        # Get pricing data for the check-in date
-        pricing_data = get_price_for_date(check_in_date)
-        if "error" in pricing_data:
-            return {
-                "success": False,
-                "error": f"Could not get pricing data: {pricing_data['error']}"
-            }
-        
         # Map package type to pricing fields
         package_rate_map = {
             "Las Hojas": {"adult_field": "lh_adulto", "child_field": "lh_nino"},
@@ -600,20 +1355,52 @@ def _calculate_booking_total(
             }
         
         rate_fields = package_rate_map[package_type]
-        adult_rate = float(pricing_data.get(rate_fields["adult_field"], 0))
-        child_rate = float(pricing_data.get(rate_fields["child_field"], 0))
         
-        if adult_rate == 0:
-            return {
-                "success": False,
-                "error": f"No adult rate found for package {package_type} on {check_in_date}"
-            }
-        
-        # Calculate nights (0 for Pasadía)
+        # Calculate nights
         check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
         check_out_dt = datetime.strptime(check_out_date, "%Y-%m-%d")
         nights = (check_out_dt - check_in_dt).days
         nights = max(1, nights)  # At least 1 day for Pasadía
+        
+        # Get pricing for EACH night and calculate average rates
+        # For a stay from 01/12 to 01/14, we need rates for nights 01/12 and 01/13
+        adult_rates_sum = 0.0
+        child_rates_sum = 0.0
+        rates_per_night = []  # For breakdown logging
+        
+        for night_offset in range(nights):
+            current_night = check_in_dt + timedelta(days=night_offset)
+            current_night_str = current_night.strftime("%Y-%m-%d")
+            
+            pricing_data = get_price_for_date(current_night_str)
+            if "error" in pricing_data:
+                return {
+                    "success": False,
+                    "error": f"Could not get pricing data for {current_night_str}: {pricing_data['error']}"
+                }
+            
+            night_adult_rate = float(pricing_data.get(rate_fields["adult_field"], 0))
+            night_child_rate = float(pricing_data.get(rate_fields["child_field"], 0))
+            
+            if night_adult_rate == 0:
+                return {
+                    "success": False,
+                    "error": f"No adult rate found for package {package_type} on {current_night_str}"
+                }
+            
+            adult_rates_sum += night_adult_rate
+            child_rates_sum += night_child_rate
+            rates_per_night.append({
+                "date": current_night_str,
+                "adult_rate": night_adult_rate,
+                "child_rate": night_child_rate
+            })
+        
+        # Calculate average rates across all nights
+        adult_rate = adult_rates_sum / nights
+        child_rate = child_rates_sum / nights
+        
+        logger.info(f"[RATE_CALC] Multi-night average rates for {nights} nights: adult=${adult_rate:.2f}, child=${child_rate:.2f} (per-night: {rates_per_night})")
         
         # Apply promotion logic before calculating totals
         adults_paying = adults  # Start with all adults paying
@@ -663,6 +1450,7 @@ def _calculate_booking_total(
             "nights": nights,
             "adult_rate_per_night": adult_rate,
             "child_rate_per_night": child_rate,
+            "rates_per_night": rates_per_night,
             "adult_total": adult_total,
             "children_0_5_total": children_0_5_total,
             "children_6_10_total": children_6_10_total,
@@ -670,7 +1458,7 @@ def _calculate_booking_total(
             "single_occupancy_surcharge": single_occupancy_surcharge,
             "total_amount": total_amount,
             "promotion_applied": promotion_details,
-            "note": "Extra bed costs excluded - charged at reception; promotions and surcharges applied"
+            "note": "Extra bed costs excluded - charged at reception; rates are averages across all nights"
         }
         
         logger.info(f"Calculated booking total for {package_type}: ${total_amount:.2f} (breakdown: {breakdown})")
@@ -736,31 +1524,45 @@ def _validate_booking_info(
         bungalow_type = "Junior"
     elif "bungalow matrimonial" in bungalow_type_lower or bungalow_type_lower == "matrimonial":
         bungalow_type = "Matrimonial"
-    elif "habitación" in bungalow_type_lower or "habitacion" in bungalow_type_lower:
+    elif "habitación" in bungalow_type_lower or "habitacion" in bungalow_type_lower or "doble" in bungalow_type_lower:
         bungalow_type = "Habitación"
 
     
-    # Check required fields and identify which are missing
+    # Helper to detect placeholder values that assistant should NOT use
+    def _is_placeholder(value: str) -> bool:
+        """Check if a value is a placeholder that should be rejected."""
+        if not value:
+            return True
+        placeholder_values = [
+            "pendiente", "por_definir", "por definir", "tbd", "auto", 
+            "n/a", "na", "ninguno", "none", "unknown", "desconocido",
+            "huésped", "huesped", "cliente", "usuario", "guest"
+        ]
+        return value.strip().lower() in placeholder_values
+    
+    # Check required fields and identify which are missing (including placeholder detection)
     missing_fields = []
-    if not customer_name or len(customer_name.strip().split()) < 2:
+    if not customer_name or len(customer_name.strip().split()) < 2 or _is_placeholder(customer_name):
         missing_fields.append("nombre completo (nombre y apellido)")
-    if not email or "@" not in email:
+    if not email or "@" not in email or _is_placeholder(email):
         missing_fields.append("correo electrónico válido")
-    if not city:
+    if not city or _is_placeholder(city):
         missing_fields.append("ciudad de residencia")
-    if not dui_passport:
+    if not dui_passport or _is_placeholder(dui_passport):
         missing_fields.append("número de DUI o pasaporte")
-    if not nationality:
+    if not nationality or _is_placeholder(nationality):
         missing_fields.append("nacionalidad")
-    if not payment_maker_name:
+    if not payment_maker_name or _is_placeholder(payment_maker_name):
         missing_fields.append("nombre del titular del pago")
     
     if missing_fields:
+        missing_list = ", ".join(missing_fields)
         return {
             "valid": False,
             "error": "missing_customer_data",
             "missing_fields": missing_fields,
-            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY"
+            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY",
+            "customer_message": f"Para completar su reserva, necesitamos los siguientes datos: {missing_list}. ¿Podría proporcionárnoslos?"
         }
     
     # Validate dates
@@ -809,7 +1611,7 @@ def _validate_booking_info(
             bungalow_type = "Junior"
         elif "bungalow matrimonial" in bungalow_type_lower or bungalow_type_lower == "matrimonial":
             bungalow_type = "Matrimonial"
-        elif "habitación" in bungalow_type_lower or "habitacion" in bungalow_type_lower:
+        elif "habitación" in bungalow_type_lower or "habitacion" in bungalow_type_lower or "doble" in bungalow_type_lower:
             bungalow_type = "Habitación"
         elif bungalow_type not in valid_bungalow_types:
             return {
@@ -833,6 +1635,24 @@ def _validate_booking_info(
             "valid": False,
             "error": "At least one adult required",
             "customer_message": "Se requiere al menos un adulto para la reserva."
+        }
+    
+    # Validate room capacity against occupancy rules
+    capacity_result = _validate_room_capacity(bungalow_type, adults, children_0_5, children_6_10)
+    if not capacity_result["valid"]:
+        # Build appropriate customer message based on error type
+        occupancy = capacity_result.get("occupancy_score", adults)
+        if occupancy < capacity_result.get("min_occupancy", 0):
+            # Too few people
+            customer_msg = f"El {bungalow_type} requiere un mínimo de {capacity_result['min_occupancy']} personas (ocupación actual: {occupancy}). {capacity_result.get('suggestion', '')}"
+        else:
+            # Too many people
+            customer_msg = f"El {bungalow_type} tiene capacidad máxima de {capacity_result['max_occupancy']} personas (ocupación actual: {occupancy}). {capacity_result.get('suggestion', '')}"
+        
+        return {
+            "valid": False,
+            "error": capacity_result["error"],
+            "customer_message": customer_msg
         }
     
     # Validate payment method
@@ -889,10 +1709,21 @@ async def _check_room_availability(check_in_date: str, check_out_date: str) -> d
         }
 
 
-def _select_room(available_rooms: dict, bungalow_type: str, package_type: str) -> Optional[str]:
+def _select_room(
+    available_rooms: dict, 
+    bungalow_type: str, 
+    package_type: str,
+    excluded_rooms: List[str] = None
+) -> Optional[str]:
     """
     Internal Chain of Thought: Select appropriate room based on type and availability.
     NEVER expose room selection logic to customers.
+    
+    Args:
+        available_rooms: Dict of room index -> room number from API
+        bungalow_type: Type of room to select
+        package_type: Package type (Las Hojas, Escapadita, Pasadía, Romántico)
+        excluded_rooms: List of room numbers already selected (for multi-room booking)
     """
     
     # DEBUG: Log room selection inputs
@@ -910,40 +1741,49 @@ def _select_room(available_rooms: dict, bungalow_type: str, package_type: str) -
         normalized_bungalow_type = bungalow_type
         logger.warning(f"[ROOM_DEBUG] Normalization failed for '{bungalow_type}', using original input")
     
-    # CRITICAL FIX: API response format is {"index": "room_number"}
-    # We need to map room NUMBERS (values) to their indices (keys) for booking
-    room_number_to_index = {}  # Maps actual room number to API index
+    # CRITICAL FIX: API response format is {"api_index": "room_number"}
+    # Keys are API indices, values are ACTUAL room numbers
+    room_number_to_index = {}  # Maps actual room number to API index (for booking API call)
     available_room_numbers = []  # List of actual room numbers available
     
-    for room_index, room_number in available_rooms.items():
+    for api_index, room_number in available_rooms.items():
         try:
             # Parse room number (the VALUE in the API response)
             if room_number == "Pasadía":
-                # Special case: Pasadía uses index directly
-                room_number_to_index["Pasadía"] = room_index
+                # Special case: Pasadía
+                room_number_to_index["Pasadía"] = api_index
                 available_room_numbers.append("Pasadía")
-            elif room_number.endswith('A'):
-                # Room with 'A' suffix (like "10A")
-                room_number_to_index[room_number] = room_index
+            elif isinstance(room_number, str) and room_number.endswith('A'):
+                # Room with 'A' suffix (like "10A", "7A")
+                room_number_to_index[room_number] = api_index
                 available_room_numbers.append(room_number)
             else:
-                # Regular numeric room
+                # Regular numeric room - room_number is the VALUE (e.g., "5" means room 5)
                 room_num = int(room_number)
-                room_number_to_index[room_num] = room_index
+                room_number_to_index[room_num] = api_index
                 available_room_numbers.append(room_num)
-        except ValueError:
-            logger.warning(f"[ROOM_DEBUG] Could not parse room number: {room_number}")
+        except (ValueError, TypeError):
+            logger.warning(f"[ROOM_DEBUG] Could not parse room number: {room_number} (api_index: {api_index})")
             continue
     
     logger.info(f"[ROOM_DEBUG] Available room numbers: {available_room_numbers}")
     logger.info(f"[ROOM_DEBUG] Room number to index mapping: {room_number_to_index}")
     
+    # Filter out already-selected rooms to prevent duplicates in multi-room booking
+    if excluded_rooms:
+        # Handle mixed types: available_room_numbers contains int (24) and str ("10A")
+        excluded_set = set(str(x) for x in excluded_rooms)
+        available_room_numbers = [
+            r for r in available_room_numbers 
+            if str(r) not in excluded_set
+        ]
+        logger.info(f"[ROOM_DEBUG] After excluding {excluded_rooms}: {available_room_numbers}")
+    
     # Special case: Pasadía package can only use Pasadía
     if package_type == "Pasadía":
         if "Pasadía" in available_room_numbers:
-            selected_index = room_number_to_index["Pasadía"]
-            logger.info(f"[ROOM_DEBUG] Selected Pasadía (index {selected_index}) for Pasadía package")
-            return str(selected_index)
+            logger.info(f"[ROOM_DEBUG] Selected Pasadía for Pasadía package")
+            return "Pasadía"  # Return room name, not API index, for consistency
         else:
             logger.info(f"[ROOM_DEBUG] Pasadía not available for Pasadía package")
             return None
@@ -972,15 +1812,15 @@ def _select_room(available_rooms: dict, bungalow_type: str, package_type: str) -
         suitable_room_numbers = [r for r in available_room_numbers if isinstance(r, int) and r in matrimonial_rooms]
         logger.info(f"[ROOM_DEBUG] Matrimonial bungalow - suitable room numbers: {suitable_room_numbers}")
     elif normalized_bungalow_type == "Habitación":
-        # Habitación: rooms with 'A' suffix (1A-14A)
+        # Habitación: rooms with 'A' suffix (1A-14A) - the room_number itself has 'A'
         suitable_room_numbers = []
-        for room_name in available_room_numbers:
-            if isinstance(room_name, str) and room_name.endswith('A'):
+        for room_number in available_room_numbers:
+            if isinstance(room_number, str) and room_number.endswith('A'):
                 try:
-                    # Extract number from room name like "10A"
-                    num = int(room_name[:-1])
+                    # Extract number from room_number like "10A"
+                    num = int(room_number[:-1])
                     if 1 <= num <= 14:
-                        suitable_room_numbers.append(room_name)
+                        suitable_room_numbers.append(room_number)
                 except ValueError:
                     continue
         logger.info(f"[ROOM_DEBUG] Habitación - suitable room numbers: {suitable_room_numbers}")
@@ -1037,8 +1877,10 @@ async def _make_booking_with_validation_and_retry(
         
         # Check if our selected room is still available
         current_available_rooms = revalidation_result["rooms"]
-        if selected_room not in current_available_rooms:
-            logger.warning(f"[ROOM_DEBUG] Room {selected_room} no longer available. Available rooms: {list(current_available_rooms.keys())}")
+        # selected_room is a room number (VALUE), so check if it's in values, not keys
+        available_room_numbers = [str(v) for v in current_available_rooms.values()]
+        if str(selected_room) not in available_room_numbers:
+            logger.warning(f"[ROOM_DEBUG] Room {selected_room} no longer available. Available rooms: {available_room_numbers}")
             
             # Try to select a different room of the same type
             new_selected_room = _select_room(current_available_rooms, bungalow_type, package_type)
@@ -1089,7 +1931,8 @@ async def _make_booking_with_validation_and_retry(
             if attempt < max_retries:
                 logger.info(f"[ROOM_DEBUG] Retrying with different room (attempt {attempt + 1}/{max_retries})")
                 # Force selection of a different room by removing current one from available list
-                filtered_rooms = {k: v for k, v in current_available_rooms.items() if k != selected_room}
+                # selected_room is a room number (VALUE), so compare to v, not k
+                filtered_rooms = {k: v for k, v in current_available_rooms.items() if str(v) != str(selected_room)}
                 new_selected_room = _select_room(filtered_rooms, bungalow_type, package_type)
                 
                 if new_selected_room:
@@ -1141,26 +1984,38 @@ async def _make_booking_api_call(
     # VALIDATION: Check for required fields BEFORE attempting booking
     # If any required field is missing, return error so assistant can ask customer
     # ═══════════════════════════════════════════════════════════════════════
+    
+    # Helper to detect placeholder values that assistant should NOT use
+    placeholder_values = [
+        "pendiente", "por_definir", "por definir", "tbd", "auto", 
+        "n/a", "na", "ninguno", "none", "unknown", "desconocido",
+        "huésped", "huesped", "cliente", "usuario", "guest"
+    ]
+    def _is_placeholder(value: str) -> bool:
+        if not value:
+            return True
+        return value.strip().lower() in placeholder_values
+    
     missing_fields = []
     
-    # Validate customer name (must have first AND last name)
+    # Validate customer name (must have first AND last name, no placeholders)
     name_parts = customer_name.strip().split() if customer_name else []
-    if len(name_parts) < 2:
+    if len(name_parts) < 2 or _is_placeholder(customer_name):
         missing_fields.append("nombre completo (nombre y apellido)")
     
-    if not email or not email.strip() or '@' not in email:
+    if not email or not email.strip() or '@' not in email or _is_placeholder(email):
         missing_fields.append("correo electrónico válido")
     
-    if not city or not city.strip():
+    if not city or not city.strip() or _is_placeholder(city):
         missing_fields.append("ciudad de residencia")
     
-    if not nationality or not nationality.strip():
+    if not nationality or not nationality.strip() or _is_placeholder(nationality):
         missing_fields.append("nacionalidad")
     
-    if not dui_passport or not dui_passport.strip():
+    if not dui_passport or not dui_passport.strip() or _is_placeholder(dui_passport):
         missing_fields.append("número de DUI o pasaporte")
     
-    if not payment_maker_name or not payment_maker_name.strip():
+    if not payment_maker_name or not payment_maker_name.strip() or _is_placeholder(payment_maker_name):
         missing_fields.append("nombre del titular de la tarjeta/cuenta")
     
     # Return error with missing fields so assistant can ask customer
@@ -1171,7 +2026,8 @@ async def _make_booking_api_call(
             "success": False,
             "error": "missing_customer_data",
             "missing_fields": missing_fields,
-            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY"
+            "assistant_action": "ASK_CUSTOMER_FOR_MISSING_DATA_NATURALLY",
+            "customer_message": f"Para completar su reserva, necesitamos los siguientes datos: {missing_list}. ¿Podría proporcionárnoslos?"
             # NOTE: Assistant should ask for missing fields in a warm, conversational way
             # Do NOT use robotic lists - weave the request into natural conversation
         }
@@ -1460,6 +2316,197 @@ async def _make_booking_api_call(
         return {
             "success": False,
             "error": f"Booking API call failed: {error_msg}"
+        }
+
+
+async def _make_multi_room_api_call(
+    customer_name: str,
+    email: str,
+    phone_number: str,
+    city: str,
+    dui_passport: str,
+    nationality: str,
+    check_in_date: str,
+    check_out_date: str,
+    reserverooms: str,
+    adultcount: str,
+    children_0_5: int,
+    children_6_10: int,
+    bungalow_type: str,
+    package_type: str,
+    payment_method: str,
+    payment_amount: float,
+    payment_maker_name: str,
+    wa_id: str,
+    authorization_number: str = None,
+    transfer_id: str = None,
+    extra_beds: int = 0,
+    extra_beds_cost: float = 0.0,
+    customer_instructions: str = None,
+    room_count: int = 1
+) -> dict:
+    """
+    Make multi-room booking API call with native + delimiter format.
+    
+    The API expects:
+    - reserverooms: "24+25+26+27" (rooms joined by +)
+    - adultcount: "2+3+2+4" (PAX per room joined by +)
+    
+    Args:
+        reserverooms: Room numbers joined by + (e.g., "24+25+26")
+        adultcount: Adults per room joined by + (e.g., "2+3+2")
+        room_count: Number of rooms being booked
+        ... other standard booking parameters ...
+    
+    Returns:
+        {"success": True, "reserva": "HR12345"} or {"success": False, "error": "..."}
+    """
+    # Parse name
+    name_parts = customer_name.strip().split()
+    firstname = name_parts[0] if name_parts else customer_name
+    lastname = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+    
+    # Determine title
+    titulo = "Sra." if any(x in firstname.lower() for x in ["maria", "ana", "rosa", "carmen"]) else "Sr."
+    if room_count > 1:
+        titulo = "Sres."  # Plural for multi-room
+    
+    # Format dates
+    check_in_formatted = datetime.strptime(check_in_date, "%Y-%m-%d").strftime("%m/%d/%Y")
+    check_out_formatted = datetime.strptime(check_out_date, "%Y-%m-%d").strftime("%m/%d/%Y")
+    
+    # Get accommodation description
+    accommodation_map = {
+        "Familiar": "Bungalow Familiar: 2 cuartos, 2 baños, sala y terraza para hamacas.",
+        "Junior": "Bungalow Junior: 1 ambiente, 2 camas, 1 baño, terraza para hamacas.",
+        "Matrimonial": "Bungalow Matrimonial: 1 ambiente, 1 cama matrimonial, 1 baño, terraza para hamacas.",
+        "Habitación": "Habitación: 1 ambiente, 2 camas, 1 baño.",
+        "Pasadía": "Pasadía"
+    }
+    
+    # Service mapping
+    service_map = {
+        "Las Hojas": "Paquete Las Hojas",
+        "Escapadita": "Paquete Escapadita",
+        "Pasadía": "Pasadía",
+        "Romántico": "Paquete Romántico"
+    }
+    
+    # Payment method mapping
+    payway = "Tarjeta de crédito" if payment_method == "CompraClick" else "Depósito a cuenta BAC"
+    
+    # Build comment
+    comment_parts = [
+        f"Reserva de {room_count} habitaciones por Valeria Mendoza"
+    ]
+    
+    # Add extra bed information if applicable
+    if extra_beds > 0:
+        if extra_beds_cost > 0:
+            comment_parts.append(f"Cama(s) extra: {extra_beds} (${extra_beds_cost:.2f} a cobrar en recepción)")
+        else:
+            comment_parts.append(f"Cama(s) extra: {extra_beds} (sin costo)")
+    
+    if customer_instructions:
+        comment_parts.append(f"Instrucciones: {customer_instructions}")
+    
+    commenthotel = " | ".join(comment_parts)
+    
+    # Calculate rates (simplified for multi-room)
+    total_adults = sum(int(x) for x in adultcount.split("+"))
+    nights = (datetime.strptime(check_out_date, "%Y-%m-%d") - 
+              datetime.strptime(check_in_date, "%Y-%m-%d")).days
+    nights = max(nights, 1)
+    
+    adult_rate = payment_amount / (total_adults * nights) if total_adults > 0 else 0
+    child_rate = adult_rate * 0.5
+    
+    # Build accommodation description (handle mixed types)
+    if bungalow_type in accommodation_map:
+        acomodacion_desc = accommodation_map[bungalow_type]
+    else:
+        # Mixed types like "2x Junior, 1x Familiar"
+        acomodacion_desc = f"Reserva múltiple: {bungalow_type}"
+    
+    # Build payload (matches _make_booking_api_call structure)
+    payload = {
+        "titulo": titulo,
+        "firstname": firstname,
+        "lastname": lastname,
+        "commenthotel": commenthotel,
+        "phone": phone_number.replace("+503", ""),
+        "reserverooms": reserverooms,
+        "ciudad": city,
+        "checkIn": check_in_formatted,
+        "checkOut": check_out_formatted,
+        "acomodacion": acomodacion_desc,
+        "adultcount": adultcount,
+        "childcount": str(children_0_5),
+        "childcount1": str(children_6_10),
+        "payway": payway,
+        "loadamount": f"{payment_amount:.2f}",
+        "email": email,
+        "dui": dui_passport,
+        "national": nationality,
+        "adultrate": f"{adult_rate:.2f}",
+        "childrate": f"{child_rate:.2f}",
+        "cardusername": payment_maker_name,
+        "reseramount": f"{payment_amount:.2f}",
+        "cardnumer": "0",
+        "duedate": "0",
+        "comment": commenthotel,
+        "compraclick": authorization_number if payment_method == "CompraClick" else None,
+        "username": "VM",
+        "cancel_flag": "no",
+        "service": service_map.get(package_type, "Estadía")
+    }
+    
+    logger.info(f"[MULTI_ROOM_API] Booking {room_count} rooms: {reserverooms}")
+    logger.info(f"[MULTI_ROOM_API] PAX distribution: {adultcount}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://booking.lashojasresort.club/api/addBookingUserRest",
+                data=payload,
+                headers={"content-type": "application/x-www-form-urlencoded"},
+                timeout=300
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"[MULTI_ROOM_API] Failed: {response.status_code} - {response.text[:200]}")
+                return {
+                    "success": False,
+                    "error": f"API returned {response.status_code}"
+                }
+            
+            # Parse response
+            response_data = {}
+            reserva = "unknown"
+            try:
+                response_data = response.json()
+                reserva = response_data.get("reserva", "unknown")
+            except Exception as parse_error:
+                logger.warning(f"[MULTI_ROOM_API] Could not parse JSON response: {parse_error}")
+                # Try to extract reserva from text response
+                if "HR" in response.text:
+                    import re
+                    match = re.search(r'HR\d+', response.text)
+                    if match:
+                        reserva = match.group(0)
+            
+            logger.info(f"[MULTI_ROOM_API] Success! Reserva: {reserva}")
+            return {
+                "success": True,
+                "reserva": reserva,
+                "response": response_data
+            }
+            
+    except Exception as e:
+        logger.exception(f"[MULTI_ROOM_API] Exception: {e}")
+        return {
+            "success": False,
+            "error": str(e)
         }
 
 
