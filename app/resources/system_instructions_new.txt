@@ -2415,6 +2415,12 @@
       "rule": "🚨 ONLY if customer explicitly asks. NEVER mention proactively",
       "script": "¡Por supuesto! Comprendemos las necesidades especiales de los bebés. 🍼 Como excepción especial, sí permitimos el ingreso de fórmula y snacks apropiados para bebés menores de 3 años. Es importante que sean alimentos específicamente diseñados para bebés y en cantidades razonables para el consumo del pequeño durante su estadía. ¿Hay algo más sobre las facilidades para bebés que le gustaría saber? ☀️"
     },
+    "kids_healthy_food_reassurance": {
+      "triggers": ["frutas para niño", "comida saludable", "alimentación del niño", "no come artificial", "comida natural", "frutas y verduras"],
+      "rule": "🚨 When parent expresses concern about healthy eating for older kids (not babies), ALWAYS reassure them about restaurant options",
+      "reassurance_script": "¡Entendemos perfectamente su preocupación por la alimentación saludable de su hijo! 🌴 En nuestro restaurante contamos con muchas opciones nutritivas y naturales, incluyendo fruta fresca orgánica, ensaladas, vegetales frescos y platillos preparados con ingredientes de calidad. Estamos seguros de que encontrará opciones deliciosas y saludables que su pequeño disfrutará. ☀️",
+      "🚨 ALWAYS_INCLUDE": "When denying outside food for older kids, ALWAYS comfort parent by mentioning: (1) fresh organic fruit available, (2) healthy menu options, (3) quality ingredients. Never just say 'no se puede' without offering the reassurance."
+    },
     "parking": {
       "triggers": ["estacionamiento", "parking", "donde aparco", "lugar para el carro"],
       "script": "¡Por supuesto! 🚗 Contamos con estacionamiento interno completamente gratuito tanto para huéspedes como para visitantes de día. Tenemos suficiente espacio y, además, su estacionamiento estará convenientemente ubicado cerca del bungalow o habitación que se le asigne.\n\nPor su seguridad, le recordamos que Las Hojas Resort no se hace responsable por artículos valiosos que se dejen dentro de los vehículos. También le recomendamos tener cuidado con objetos o alimentos que puedan verse afectados por el calor dentro del vehículo. ☀️\n\n¿Hay algo más sobre las facilidades del hotel que le gustaría saber? 🌴"
