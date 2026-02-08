@@ -92,10 +92,61 @@ def _check_authorization_duplicate(auth_code: str, wa_id: str) -> tuple:
         return False, ""
 
 
+def _reserve_authorization_atomic(auth_code: str, wa_id: str) -> tuple:
+    """
+    ATOMIC check-and-reserve: Check if authorization is available AND reserve it in one operation.
+    This prevents race conditions where two workers both pass the check before either marks it.
+    Returns (success, message). If success=False, another booking is using this auth.
+    """
+    if not auth_code:
+        return True, ""
+    
+    current_time = time.time()
+    auth_key = auth_code.strip().upper()
+    
+    with _used_authorizations_mutex:
+        # Clean old entries (older than cooldown)
+        expired = [k for k, v in _used_authorizations.items() 
+                   if current_time - v[1] > AUTHORIZATION_COOLDOWN_SECONDS]
+        for k in expired:
+            del _used_authorizations[k]
+        
+        # Check if this auth code was recently used
+        if auth_key in _used_authorizations:
+            prev_wa_id, prev_time = _used_authorizations[auth_key]
+            age_seconds = current_time - prev_time
+            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Authorization {auth_code} already reserved {age_seconds:.0f}s ago for {prev_wa_id}")
+            return False, f"Authorization code {auth_code} was already used for a booking"
+        
+        # ATOMICALLY reserve it NOW before making the API call
+        _used_authorizations[auth_key] = (wa_id, current_time)
+        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RESERVED authorization {auth_code} for {wa_id} (will release if booking fails)")
+        return True, ""
+
+
+def _release_authorization(auth_code: str, wa_id: str) -> None:
+    """
+    Release a reserved authorization if booking fails.
+    Only releases if the reservation belongs to the same wa_id.
+    """
+    if not auth_code:
+        return
+    
+    auth_key = auth_code.strip().upper()
+    
+    with _used_authorizations_mutex:
+        if auth_key in _used_authorizations:
+            reserved_wa_id, _ = _used_authorizations[auth_key]
+            if reserved_wa_id == wa_id:
+                del _used_authorizations[auth_key]
+                logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RELEASED authorization {auth_code} for {wa_id} (booking failed)")
+
+
 def _mark_authorization_used(auth_code: str, wa_id: str) -> None:
     """
     Mark authorization code as used AFTER successful booking.
     Should only be called after booking is confirmed successful.
+    Note: With atomic reservation, the auth is already in the dict, this just logs confirmation.
     """
     if not auth_code:
         return
@@ -105,7 +156,7 @@ def _mark_authorization_used(auth_code: str, wa_id: str) -> None:
     
     with _used_authorizations_mutex:
         _used_authorizations[auth_key] = (wa_id, current_time)
-        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] Marked authorization {auth_code} as used for {wa_id}")
+        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] CONFIRMED authorization {auth_code} as used for {wa_id}")
 
 # Shared Normalization and Assistant Classification Functions
 
@@ -636,11 +687,11 @@ async def make_multi_room_booking(
             "error": "authorization_number parameter is required for CompraClick payments"
         }
     
-    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used (don't mark yet)
+    # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
     payment_ref = authorization_number or transfer_id
     if payment_ref:
-        is_duplicate, dup_message = _check_authorization_duplicate(payment_ref, wa_id)
-        if is_duplicate:
+        reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
+        if not reserve_success:
             logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Blocking duplicate multi-room booking for {wa_id} with payment ref {payment_ref}")
             return {
                 "success": True,
@@ -688,6 +739,9 @@ async def make_multi_room_booking(
         if missing_fields:
             missing_list = ", ".join(missing_fields)
             logger.warning(f"[MULTI_ROOM] Missing required fields (incl. placeholders): {missing_list}")
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": "missing_customer_data",
@@ -701,12 +755,18 @@ async def make_multi_room_booking(
             check_in = datetime.strptime(check_in_date, "%Y-%m-%d")
             check_out = datetime.strptime(check_out_date, "%Y-%m-%d")
             if check_out <= check_in:
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": "Check-out date must be after check-in date",
                     "customer_message": "La fecha de salida debe ser posterior a la fecha de entrada."
                 }
         except ValueError:
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": "Invalid date format",
@@ -719,6 +779,9 @@ async def make_multi_room_booking(
         )
         
         if not room_result["success"]:
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": room_result["error"],
@@ -733,6 +796,9 @@ async def make_multi_room_booking(
             from .bank_transfer_tool import reserve_bank_transfer
             reserve_result = reserve_bank_transfer(int(transfer_id), payment_amount)
             if not reserve_result.get("success"):
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": "Payment reservation failed",
@@ -743,6 +809,9 @@ async def make_multi_room_booking(
             from .compraclick_tool import reserve_compraclick_payment
             reserve_result = await reserve_compraclick_payment(authorization_number, payment_amount)
             if not reserve_result.get("success"):
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": "CompraClick reservation failed",
@@ -759,6 +828,9 @@ async def make_multi_room_booking(
             logger.warning(f"[MULTI_ROOM] Re-validation failed: {revalidation_result['error']}")
             retry_result = await _get_multiple_rooms(check_in_date, check_out_date, room_bookings, package_type)
             if not retry_result["success"]:
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": "Rooms became unavailable during booking",
@@ -815,6 +887,9 @@ async def make_multi_room_booking(
         )
         
         if not booking_result["success"]:
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": booking_result.get("error"),
@@ -860,6 +935,9 @@ Los detalles han sido enviados a su correo electrónico. ¡Esperamos verle pront
     
     except Exception as e:
         logger.error(f"[MULTI_ROOM] Unexpected error: {e}")
+        # RELEASE the atomic reservation since booking failed with exception
+        if payment_ref:
+            _release_authorization(payment_ref, wa_id)
         return {
             "success": False,
             "error": f"Unexpected error: {e}",
@@ -1073,11 +1151,12 @@ async def make_booking(
             "error": "authorization_number parameter is required for CompraClick payments"
         }
     
-    # DUPLICATE BOOKING PREVENTION: Check if this payment reference was already used (don't mark yet)
+    # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
+    # This reserves the authorization BEFORE the API call, preventing two workers from both passing
     payment_ref = authorization_number or transfer_id
     if payment_ref:
-        is_duplicate, dup_message = _check_authorization_duplicate(payment_ref, wa_id)
-        if is_duplicate:
+        reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
+        if not reserve_success:
             logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Blocking duplicate booking for {wa_id} with payment ref {payment_ref}")
             return {
                 "success": True,  # Return success to prevent retry loops
@@ -1107,6 +1186,9 @@ async def make_booking(
         
         if not validation_result["valid"]:
             logger.warning(f"Booking validation failed: {validation_result['error']}")
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": validation_result["error"],
@@ -1120,6 +1202,9 @@ async def make_booking(
         availability_result = await _check_room_availability(check_in_date, check_out_date)
         if not availability_result["success"]:
             logger.warning(f"Room availability check failed: {availability_result['error']}")
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": availability_result["error"],
@@ -1203,6 +1288,9 @@ async def make_booking(
             else:
                 instruction = f"🚨 El tipo {bungalow_type} no está disponible y NO HAY ALTERNATIVAS (ni single ni multi-room) para su grupo de {adults} adultos{' y ' + str(children_6_10) + ' niños' if children_6_10 > 0 else ''}. DEBES ofrecer: 1) Buscar otras fechas con check_smart_availability, o 2) Reembolso completo."
             
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": "No suitable room available",
@@ -1226,6 +1314,9 @@ async def make_booking(
             reservation_result = reserve_bank_transfer(int(transfer_id), payment_amount)
             if not reservation_result["success"]:
                 logger.error(f"Bank transfer reservation failed: {reservation_result['message']}")
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": f"Bank transfer reservation failed: {reservation_result['message']}",
@@ -1245,6 +1336,9 @@ async def make_booking(
             if not reservation_result["success"]:
                 # If reservation fails here, it means validation wasn't done properly
                 logger.error(f"CompraClick payment reservation failed (validation required): {reservation_result['error']}")
+                # RELEASE the atomic reservation since booking failed
+                if payment_ref:
+                    _release_authorization(payment_ref, wa_id)
                 return {
                     "success": False,
                     "error": f"Payment validation required before booking: {reservation_result['error']}",
@@ -1265,6 +1359,9 @@ async def make_booking(
         
         if not booking_result["success"]:
             logger.error(f"Enhanced booking process failed: {booking_result['error']}")
+            # RELEASE the atomic reservation since booking failed
+            if payment_ref:
+                _release_authorization(payment_ref, wa_id)
             return {
                 "success": False,
                 "error": booking_result["error"],
@@ -1306,6 +1403,9 @@ Los detalles de su reserva han sido enviados a su correo electrónico. Si tiene 
         
     except Exception as e:
         logger.error(f"Unexpected error in make_booking: {e}")
+        # RELEASE the atomic reservation since booking failed with exception
+        if payment_ref:
+            _release_authorization(payment_ref, wa_id)
         return {
             "success": False,
             "error": f"Unexpected error in booking process: {e}",

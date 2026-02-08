@@ -2612,9 +2612,11 @@ async def get_openai_response(
                 raise retry_error
         elif "context_length_exceeded" in str(e).lower() or "context window" in str(e).lower():
             # Handle context window overflow by rotating to new conversation
-            logger.warning(f"[THREAD_ROTATION] Context window exceeded, rotating to new conversation thread")
+            logger.warning(f"[THREAD_ROTATION] Context window exceeded for {user_identifier}, rotating to new conversation thread")
             try:
+                logger.info(f"[THREAD_ROTATION] Calling rotate_conversation_thread for {user_identifier}")
                 new_conversation_id = await rotate_conversation_thread(conversation_id, user_identifier, contextualized_message, system_instructions)
+                logger.info(f"[THREAD_ROTATION] rotate_conversation_thread returned: {new_conversation_id}")
                 if new_conversation_id:
                     # CRITICAL: Clear old response ID to prevent using old conversation's response
                     save_response_id(user_identifier, None)
@@ -2664,13 +2666,16 @@ async def get_openai_response(
                     # This ensures proper tool execution flow after thread rotation
                     # Note: The recursive call will increment message count to 1 and send base_modules
                     logger.info(f"[THREAD_ROTATION] Retrying with new conversation {new_conversation_id} through complete flow (base_modules will be sent)")
-                    return await get_openai_response(
+                    logger.info(f"[THREAD_ROTATION] Making recursive call to get_openai_response for {user_identifier}")
+                    result = await get_openai_response(
                         message,
                         thread_id=new_conversation_id,
                         phone_number=phone_number,
                         subscriber_id=subscriber_id,
                         channel=channel,
                     )
+                    logger.info(f"[THREAD_ROTATION] Recursive call completed successfully for {user_identifier}")
+                    return result
                 else:
                     raise RuntimeError(f"Thread rotation failed: unable to create new conversation for {phone_number}")
             except Exception as rotation_error:

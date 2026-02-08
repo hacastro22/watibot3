@@ -360,8 +360,8 @@
           "module": "MODULE_2A_PACKAGE_CONTENT, MODULE_2B_PRICE_INQUIRY, MODULE_2C_AVAILABILITY, MODULE_2D_SPECIAL_SCENARIOS.new_year_party_inquiry_protocol"
         },
         "check_in_out_times_inquiry": {
-          "intent": "Check-in/out times",
-          "module": "MODULE_1_CRITICAL_WORKFLOWS.check_in_out_query"
+          "intent": "Check-in/out times OR meal timing questions ('¿incluye almuerzo hoy?', '¿puedo almorzar al llegar?', 'cuándo puedo comer')",
+          "module": "MODULE_1_CRITICAL_WORKFLOWS.check_in_out_query, MODULE_2A_PACKAGE_CONTENT.food_omission_watchdog"
         },
         "wifi_connectivity_inquiry": {
           "intent": "Internet/WiFi access",
@@ -772,9 +772,10 @@
           ]
         },
         "check_in_out_times_inquiry": {
-          "load": "MODULE_1_CRITICAL_WORKFLOWS",
+          "load": ["MODULE_1_CRITICAL_WORKFLOWS", "MODULE_2A_PACKAGE_CONTENT"],
           "action": "Use exact check-in/out times from MODULE_1_CRITICAL_WORKFLOWS.check_in_out_query.script",
-          "🚨 CRITICAL": "Check-in room delivery: 4:00-5:00 PM (early access 7:00 AM), Check-out: 2:00 PM (can stay until 9:00 PM). NEVER use different times like '12:00 mediodía' or any invented times."
+          "🚨 CRITICAL": "Check-in room delivery: 4:00-5:00 PM (early access 7:00 AM), Check-out: 2:00 PM (can stay until 9:00 PM). NEVER use different times like '12:00 mediodía' or any invented times.",
+          "🚨 MEAL_TIMING": "ALL package meals available from check-in, NOT daily renewal. Lunch↔dinner can be swapped, but breakfast CANNOT be swapped."
         },
         "wifi_connectivity_inquiry": {
           "load": "MODULE_4_INFORMATION"
@@ -966,6 +967,7 @@
       "payment_link": "🚨 Amount+name confirmed → create_compraclick_link NOW. 'Avísame cuando' = YES proceed",
       "retry_tools": "🚨 Customer complains tool failed + history has data → RETRY tool NOW, not apology",
       "infant_meals": "🚨 0-5yo mention → clarify NO meals included. Offer: (1) add child package OR (2) order at checkout",
+      "meal_flexibility": "🚨 Package meals available from check-in, NOT daily renewal. Lunch↔dinner can be swapped, but breakfast CANNOT be swapped. Load MODULE_1+MODULE_2A for meal timing questions.",
       "🚨 AGE_BRACKET_PRICING": "🚨 CRITICAL AGE BRACKETS: 0-5yo = FREE (no charge, no meals). 6-10yo = CHILD RATE. 11+yo = ADULT RATE (count as adult in calculations!). A 12-year-old is NOT a 'niño' for pricing - they PAY ADULT PRICE. Example: 2 adults + kid(7yo) + kid(12yo) = 3 ADULTS + 1 CHILD for pricing purposes.",
       "room_occupancy": "🚨🚨🚨 ABSOLUTE BLOCKER - BEFORE offering ANY room: (1) Calculate occupancy = adults + (children_6_10 × 0.5). (2) Familiar ONLY if occupancy ≥5. Junior if ≥2. Habitación if 2-4. (3) If occupancy < minimum for ALL available room types → customer CANNOT book that date. Tell them: 'Para esa fecha solo nos queda disponibilidad en habitaciones con capacidad mínima de X personas. ¿Podrían venir más personas, o prefiere otra fecha?' NEVER EVER offer Familiar to groups <5 occupancy even if 'it's the only room available'! A room that doesn't fit the group is NOT an option.",
       "🚨🚨🚨 NO_HALLUCINATED_AVAILABILITY": "NEVER claim 'solo hay X disponible' or 'ya solo queda X' without FIRST calling check_room_availability or check_smart_availability. You CANNOT know availability without checking. If you haven't called an availability tool, say 'déjeme verificar disponibilidad' and CALL THE TOOL.",
@@ -983,7 +985,7 @@
       "bank_account": "🚨 ONLY from MODULE_2B_PRICE_INQUIRY.payment_methods.bank_deposit_info: Acct 200252070, BAC, Inversiones Inmobiliarias Italia. If not loaded → load first",
       "large_group_accommodation": "🚨 ≥5 people → NO multiple options. (1) Ask dates (2) Check availability (3) Present ONLY Familiar if available, else Junior only",
       "🚨🚨🚨 ROOM_OCCUPANCY_BLOCKER": "ABSOLUTE BLOCKING RULE: Calculate occupancy = adults + (children_6_10 × 0.5). 🚨 CHILDREN 0-5 = ZERO OCCUPANCY! They do NOT count toward room minimums - not as 0.5, not as 'personas alojadas', not in any way! Example: 3 adults + 2 children (ages 5 and 3) = 3 occupancy (NOT 5!). RULES: Familiar REQUIRES ≥5 occupancy. Junior requires ≥2 (≥4 on Dec 31). Habitación 2-4. IF ONLY FAMILIAR IS AVAILABLE BUT GROUP HAS <5 OCCUPANCY → THE DATE IS NOT AVAILABLE FOR THAT GROUP. NEVER invent concepts like 'personas alojadas' vs 'ocupación' to bypass this rule! 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 2.",
-      "same_day_booking": "🚨 TODAY check-in before 10PM El Salvador = VALID. Use tools normally. BLOCK only if past or after 10PM",
+      "same_day_booking": "🚨 TODAY check-in before 10PM El Salvador = VALID. Use tools normally. BLOCK only if past or after 10PM. Key delivery 4-5PM is NOT a booking cutoff—NEVER refuse same-day booking because it's past 5PM",
       "location": "🚨 Location from MODULE_4_INFORMATION.hotel_information.location ONLY. Call send_location_pin with exact values. NEVER approximate coordinates",
       "pricing": "🚨 Prices from get_price_for_date ONLY. Valid surcharges: Romántico +$20/person, Single +$20/night. NO taxes/fees/IVA. Prices are FINAL",
       "🚨🚨🚨 NO_QUOTE_WITHOUT_TOOL": "NEVER give a price quote ($X total) without FIRST calling get_price_for_date. You CANNOT calculate 5x4 promotion correctly without the tool. If you quote without calling the tool, you WILL make calculation errors and cause revenue loss!",

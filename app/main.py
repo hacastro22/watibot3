@@ -156,8 +156,28 @@ def generate_message_key(wa_id: str, message_text: str, message_type: str = None
         Unique message key combining wa_id and content hash
     """
     import hashlib
-    # Create hash from message content to identify unique messages
-    content_hash = hashlib.md5(f"{message_text}:{message_type}".encode()).hexdigest()[:12]
+    import urllib.parse
+    
+    # Normalize content: extract fileName from full URLs to ensure same file = same hash
+    # This prevents duplicates when universal webhook sends full URL and main webhook sends short path
+    normalized_content = message_text
+    if message_text and message_text.startswith("http"):
+        try:
+            parsed = urllib.parse.urlparse(message_text)
+            query_params = urllib.parse.parse_qs(parsed.query)
+            if 'fileName' in query_params:
+                normalized_content = query_params['fileName'][0]
+        except Exception:
+            pass  # Keep original content if parsing fails
+    
+    # Normalize type: treat 'document' and 'image' as same for file-based messages
+    # Main webhook may classify PDFs as 'image' while universal webhook uses 'document'
+    normalized_type = message_type
+    if message_type in ('document', 'image') and normalized_content and ('/' in normalized_content):
+        normalized_type = 'file'  # Unify document/image types for file paths
+    
+    # Create hash from normalized content to identify unique messages
+    content_hash = hashlib.md5(f"{normalized_content}:{normalized_type}".encode()).hexdigest()[:12]
     return f"{wa_id}:{content_hash}"
 
 
@@ -403,6 +423,19 @@ async def process_audio_message(file_path: str) -> str:
     logger.info(f"[PROCESS_AUDIO] Starting processing for audio: {file_path}")
     tmpfile_path = None
     try:
+        # Handle full URL vs. just the file path
+        # WATI sometimes sends full URLs like: https://live-mt-server.wati.io/.../showFile?fileName=data/audios/...
+        if file_path.startswith("http"):
+            # Extract just the fileName parameter from the URL
+            import urllib.parse
+            parsed = urllib.parse.urlparse(file_path)
+            query_params = urllib.parse.parse_qs(parsed.query)
+            if 'fileName' in query_params:
+                file_path = query_params['fileName'][0]
+                logger.info(f"[PROCESS_AUDIO] Extracted fileName from URL: {file_path}")
+            else:
+                logger.warning(f"[PROCESS_AUDIO] Full URL provided but no fileName param found: {file_path}")
+        
         media_url = f"{config.WATI_API_URL}/api/v1/getMedia?fileName={file_path}"
         headers = {"Authorization": f"Bearer {config.WATI_API_KEY}"}
 

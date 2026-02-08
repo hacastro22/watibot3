@@ -21,6 +21,9 @@ from pdf2image import convert_from_path
 import io
 from PIL import Image
 
+from .flex_tier_handler import call_with_flex_fallback
+from . import config
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -152,9 +155,14 @@ async def download_file(file_url: str) -> Tuple[Optional[bytes], Optional[str]]:
                 logger.exception(f"Error reading local file: {str(e)}")
                 return None, None
         else:
-            # It's a URL
+            # It's a URL - check if it's a WATI URL that needs authentication
+            headers = {}
+            if 'wati.io' in file_url:
+                headers['Authorization'] = f'Bearer {config.WATI_API_KEY}'
+                logger.info(f"[WATI_DOWNLOAD] Adding auth header for WATI URL")
+            
             async with aiohttp.ClientSession() as session:
-                async with session.get(file_url) as response:
+                async with session.get(file_url, headers=headers) as response:
                     if response.status != 200:
                         logger.error(f"Failed to download file: HTTP {response.status}")
                         return None, None
@@ -358,20 +366,65 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                 "image_url": img["image_url"]
             })
 
-        # Call OpenAI API using Responses API
-        # Use Chat Completions API (supports images properly)
+        # Call OpenAI API using Chat Completions API with Flex tier fallback
         # Using gpt-5-mini for better OCR accuracy on payment receipts
-        response = await client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_completion_tokens=2048  # gpt-5-mini requires max_completion_tokens
+        logger.info("[PAYMENT_PROOF] Calling OpenAI API for payment proof analysis (Flex tier with fallback)")
+        
+        async def _flex_call():
+            return await client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=128000,
+                service_tier="flex"
+            )
+        
+        async def _standard_call():
+            return await client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=128000
+            )
+        
+        response = await call_with_flex_fallback(
+            flex_call=_flex_call,
+            standard_call=_standard_call,
+            operation_name="payment_proof_analyzer"
         )
 
         # Parse response
         try:
             # Extract text from Chat Completions API format
-            result = response.choices[0].message.content
+            message = response.choices[0].message
+            result = message.content
+            logger.info(f"[PAYMENT_PROOF] Raw API response content: {repr(result)[:500]}")
+            logger.info(f"[PAYMENT_PROOF] Response finish_reason: {response.choices[0].finish_reason}")
+            
+            # Check for refusal (model declined to process image)
+            if hasattr(message, 'refusal') and message.refusal:
+                logger.error(f"[PAYMENT_PROOF] Model REFUSED to process image: {message.refusal}")
+                return {
+                    "success": False,
+                    "is_valid_receipt": False,
+                    "receipt_type": "unknown",
+                    "chain_of_thought": {},
+                    "extracted_info": {},
+                    "error": f"Model refused to process image: {message.refusal}"
+                }
+            
+            # Handle empty response
+            if not result or result.strip() == "":
+                logger.error(f"[PAYMENT_PROOF] Model returned empty content! finish_reason={response.choices[0].finish_reason}")
+                return {
+                    "success": False,
+                    "is_valid_receipt": False,
+                    "receipt_type": "unknown",
+                    "chain_of_thought": {},
+                    "extracted_info": {},
+                    "error": f"Model returned empty response (finish_reason: {response.choices[0].finish_reason})"
+                }
+            
             parsed_result = json.loads(result)
 
             # Add success field and ensure structure

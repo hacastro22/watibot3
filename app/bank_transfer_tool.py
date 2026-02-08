@@ -518,11 +518,61 @@ async def sync_bank_transfers() -> dict:
                 
                 # Continue the infinite retry loop
 
+async def download_bank_csv_standalone() -> str:
+    """
+    Standalone function to download bank CSV file.
+    Used for re-downloading when file is missing during processing.
+    Returns the path to the downloaded file.
+    """
+    logger.info("[CSV_REDOWNLOAD] Starting standalone CSV download...")
+    
+    username = os.getenv('BAC_USERNAME')
+    password = os.getenv('BAC_PASSWORD')
+    
+    if not username or not password:
+        raise Exception("BAC credentials not found in environment variables")
+    
+    async with async_playwright() as p:
+        browser = None
+        try:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+            
+            client = await context.new_cdp_session(page)
+            await client.send('Page.setDownloadBehavior', {'behavior': 'allow', 'downloadPath': DOWNLOAD_PATH})
+            
+            file_path = await login_and_download_csv(page, username, password)
+            
+            # Logout
+            try:
+                await human_click(page, 'p.bel-typography.bel-typography-p.header-text-color.padding-right-xs', options={'timeout': 10000})
+                await page.wait_for_load_state('networkidle', timeout=30000)
+            except Exception:
+                pass
+            
+            logger.info(f"[CSV_REDOWNLOAD] Successfully downloaded: {file_path}")
+            return file_path
+        finally:
+            if browser:
+                await browser.close()
+
+
 async def process_csv_and_insert_to_db(file_path: str) -> dict:
     """
     Processes the downloaded CSV file and inserts data into the bac table.
     Uses infinite retry for database operations.
+    
+    If file is missing mid-retry, triggers re-download and continues.
     """
+    # Use mutable container so we can update file_path during retry
+    current_file = [file_path]
+    
     def _execute_csv_processing():
         conn = get_db_connection()
         try:
@@ -552,7 +602,7 @@ async def process_csv_and_insert_to_db(file_path: str) -> dict:
             header_found = False
             headers = ['date', 'reference', 'code', 'description', 'debit', 'credit', 'balance']
 
-            with open(file_path, mode='r', encoding='latin-1') as csvfile:
+            with open(current_file[0], mode='r', encoding='latin-1') as csvfile:
                 reader = csv.reader(csvfile)
                 for row_values in reader:
                     if not header_found and any(cell and 'Fecha de Transacci' in cell for cell in row_values):
@@ -605,7 +655,36 @@ async def process_csv_and_insert_to_db(file_path: str) -> dict:
                     pass
                 conn.close()
     
-    return execute_with_retry(_execute_csv_processing, f"process_csv_and_insert_to_db({file_path})")
+    # Custom retry loop that handles FileNotFoundError by re-downloading
+    retry_count = 0
+    delay = 60  # Start with 60 second delay
+    max_delay = 300  # Cap at 5 minutes
+    
+    while True:
+        try:
+            result = _execute_csv_processing()
+            if retry_count > 0:
+                logger.info(f"[CSV_SYNC] Succeeded after {retry_count} retries")
+            return result
+        except FileNotFoundError as e:
+            retry_count += 1
+            logger.warning(f"[CSV_SYNC] File not found (attempt #{retry_count}): {current_file[0]}. Triggering re-download...")
+            try:
+                # Re-download the CSV file
+                new_file_path = await download_bank_csv_standalone()
+                current_file[0] = new_file_path
+                logger.info(f"[CSV_SYNC] Re-downloaded CSV to: {new_file_path}. Retrying processing...")
+                # Short delay before retry after successful download
+                await asyncio.sleep(2)
+            except Exception as download_err:
+                logger.error(f"[CSV_SYNC] Re-download failed: {download_err}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, max_delay)
+        except Exception as err:
+            retry_count += 1
+            logger.error(f"[CSV_SYNC] Attempt #{retry_count} failed: {err}. Retrying in {delay}s...")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_delay)
 
 def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: float) -> dict:
     """
