@@ -43,3 +43,7 @@ PUBLIC_MEDIA_BASE_URL = os.getenv('PUBLIC_MEDIA_BASE_URL', 'https://media.exampl
 # Enable/disable Flex tier for cost savings (50% cheaper but higher latency)
 FLEX_ENABLED = os.getenv("FLEX_ENABLED", "true").lower() == "true"
 FLEX_TIMEOUT_SECONDS = int(os.getenv("FLEX_TIMEOUT_SECONDS", "120"))  # 2 minutes
+
+# RAG Configuration
+# Enable/disable RAG-based module retrieval (default: False = use current architecture)
+RAG_ENABLED = os.getenv("RAG_ENABLED", "false").lower() == "true"

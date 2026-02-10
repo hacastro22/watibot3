@@ -24,3 +24,7 @@ google-auth-oauthlib==1.2.0
 
 # Retry logic with exponential backoff
 tenacity==8.2.3
+
+# RAG vector store
+chromadb==0.5.23
+pysqlite3-binary==0.5.4.post2

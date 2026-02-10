@@ -1704,7 +1704,28 @@ async def get_openai_response(
     current_message_count = increment_message_count(user_identifier)
     
     # Load dynamic system instructions with base modules
-    system_instructions = build_classification_system_prompt()
+    if config.RAG_ENABLED:
+        # RAG path: always-on core + semantically retrieved chunks
+        # Lazy imports to avoid affecting production when RAG_ENABLED=False
+        from .rag.always_on_core import get_core_prompt
+        from .rag.retriever import retrieve
+        core_prompt = get_core_prompt()
+        # Extract the raw user message for retrieval — the full `message` may
+        # include missed-messages context prepended by main.py, which would
+        # pollute the embedding query.  The actual user text comes after the
+        # "=== FIN DE MENSAJES PERDIDOS ===" footer when present.
+        _rag_query = message
+        _missed_footer = "=== FIN DE MENSAJES PERDIDOS ==="
+        if _missed_footer in message:
+            _rag_query = message.split(_missed_footer, 1)[1].strip()
+        retrieved_chunks = await retrieve(_rag_query)
+        system_instructions = core_prompt + "\n\n=== RELEVANT MODULE CONTENT ===\n" + retrieved_chunks
+        logger.info(
+            f"[RAG] System prompt built: {len(system_instructions):,} chars "
+            f"(core: {len(core_prompt):,}, retrieved: {len(retrieved_chunks):,})"
+        )
+    else:
+        system_instructions = build_classification_system_prompt()
     
     # Log token optimization
     try:
@@ -1997,7 +2018,7 @@ async def get_openai_response(
             # ALWAYS send system_instructions on every call - OpenAI's automatic prompt caching
             # will cache the prefix (system instructions + tools) at 50% discount after first call.
             # This ensures instructions are ALWAYS present and prevents model from "forgetting" rules.
-            logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (always sent - OpenAI caches automatically)")
+            logger.info(f"[PROMPT_CACHING] Sending system_instructions at message {current_message_count} ({'RAG' if config.RAG_ENABLED else 'legacy'}, always sent - OpenAI caches automatically)")
             
             if previous_response_id:
                 # Continue from existing response - always include system instructions
