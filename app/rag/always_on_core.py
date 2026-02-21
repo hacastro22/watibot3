@@ -93,8 +93,7 @@ Additionally, RELEVANT MODULE CONTENT has been pre-loaded below based on the use
 Use the DECISION_TREE to understand the user's intent, MODULE_DEPENDENCIES to know which tools to use,
 and the pre-loaded module content to follow the correct protocols.
 
-If the pre-loaded content does not cover what you need, you can still call load_additional_modules()
-as a fallback to load specific modules or protocols.
+ALL relevant protocols and rules have been pre-loaded for you. Use the content provided below to respond accurately.
 
 KEY RULES:
 1. For pricing/quotes: Use the pricing_logic and quote_generation_protocol from loaded content

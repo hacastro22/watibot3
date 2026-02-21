@@ -14,13 +14,17 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 # Default number of chunks to retrieve per query
-# Set to 12 to ensure critical protocol chunks (e.g. quote_generation_protocol,
-# pricing_logic) are captured even for ambiguous pricing queries where they
-# may rank between #6 and #12 depending on phrasing.
-DEFAULT_TOP_K = 12
+# Set to 15: load_additional_modules has been removed when RAG is enabled,
+# so retrieval must capture all critical protocols. 15 chunks with 25K budget
+# replaces the old module-loading fallback while still saving tokens vs the
+# combined RAG + load_additional_modules approach (~90K → ~85K, 1 API call).
+DEFAULT_TOP_K = 15
 
 # Maximum total characters of retrieved content to inject
-MAX_RETRIEVED_CHARS = 20000
+# Set to 25000: without load_additional_modules fallback, RAG must carry
+# all protocol content. 25K covers the information that was previously
+# split between 15K RAG + 15-20K module loads.
+MAX_RETRIEVED_CHARS = 25000
 
 
 async def retrieve(

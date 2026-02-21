@@ -143,6 +143,89 @@ def _coerce_output_str(result: Any) -> str:
         return str(result)
 
 
+def _build_input_messages(system_msg: str, user_msg: str, developer_msg: str = None) -> list:
+    """Build the input message list for Responses API calls.
+
+    Uses the new role assignment:
+    - system (every turn): behavioral rules + RAG chunks (if RAG) or module-loading instruction
+    - developer (periodic): base modules (DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG)
+
+    Args:
+        system_msg: Behavioral rules + dynamic content. Sent every turn.
+        user_msg: The user's message.
+        developer_msg: Base modules. Only included when provided (msg 1, 3, 6, 9...).
+
+    Returns:
+        List of input message dicts for the Responses API.
+    """
+    msgs = [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": system_msg}]
+        }
+    ]
+    if developer_msg:
+        msgs.append({
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": developer_msg}]
+        })
+    msgs.append({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": user_msg}]
+    })
+    return msgs
+
+
+_OCCUPANCY_RULES_CACHE: str = ""
+
+def _get_occupancy_rules() -> str:
+    """Return ALL occupancy-related rules consolidated from system instructions.
+
+    Pulls from four sources and merges them into a single block:
+    1. MODULE_2C_AVAILABILITY.occupancy_rules (limits, auto_filter, Dec 31,
+       + moved prohibitions: room_occupancy, ROOM_OCCUPANCY_BLOCKER,
+       MULTI_ROOM_COUNT_VERIFICATION)
+    2. DECISION_TREE.multi_room_booking.CAPACITY_RULES (min/max + formula)
+    3. INTENT_TO_MODULE_MAP.multi_room_booking.CAPACITY_VALIDATION (per-room check)
+    4. INTENT_TO_MODULE_MAP.wants_to_book.OCCUPANCY_CHECK (pre-offer gate)
+
+    Appended to availability tool outputs so the model always has room
+    capacity constraints when deciding which room type to offer.
+    """
+    global _OCCUPANCY_RULES_CACHE
+    if _OCCUPANCY_RULES_CACHE:
+        return _OCCUPANCY_RULES_CACHE
+    try:
+        path = os.path.join(os.path.dirname(__file__), "resources", "system_instructions_new.txt")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+        # Source 1: MODULE_2C occupancy_rules (now includes moved prohibitions)
+        rules = data["MODULE_2C_AVAILABILITY"]["occupancy_rules"]
+        # Source 2: DECISION_TREE.PRIORITY_3_SALES_INTENTS.multi_room_booking
+        dt_intents = data.get("DECISION_TREE", {}).get("priority_based_classification", {})
+        dt_p3 = dt_intents.get("PRIORITY_3_SALES_INTENTS", {})
+        capacity_rules = dt_p3.get("multi_room_booking", {}).get("⚠️ CAPACITY_RULES", "")
+        # Source 3-4: INTENT_TO_MODULE_MAP.PRIORITY_3_SALES
+        intent_map = data.get("MODULE_DEPENDENCIES", {}).get("INTENT_TO_MODULE_MAP", {})
+        p3_sales = intent_map.get("PRIORITY_3_SALES", {})
+        capacity_validation = p3_sales.get("multi_room_booking", {}).get("⚠️ CAPACITY_VALIDATION", "")
+        occupancy_check = p3_sales.get("wants_to_book", {}).get("🚨 OCCUPANCY_CHECK", "")
+
+        parts = [json.dumps({"occupancy_rules": rules}, ensure_ascii=False, indent=2)]
+        if capacity_rules:
+            parts.append(f"\n⚠️ CAPACITY_RULES: {capacity_rules}")
+        if capacity_validation:
+            parts.append(f"\n⚠️ CAPACITY_VALIDATION: {capacity_validation}")
+        if occupancy_check:
+            parts.append(f"\n🚨 OCCUPANCY_CHECK: {occupancy_check}")
+        _OCCUPANCY_RULES_CACHE = "\n".join(parts)
+    except Exception as e:
+        logger.error(f"[OCCUPANCY_RULES] Failed to load: {e}")
+        _OCCUPANCY_RULES_CACHE = '{"error": "occupancy_rules unavailable"}'
+    return _OCCUPANCY_RULES_CACHE
 
 
 # Add system instruction loading function
@@ -1703,41 +1786,53 @@ async def get_openai_response(
     user_identifier = phone_number or subscriber_id or "unknown"
     current_message_count = increment_message_count(user_identifier)
     
-    # Load dynamic system instructions with base modules
+    # Copy module-level tools/available_functions into local variables so they
+    # can be conditionally filtered when RAG is enabled (avoids UnboundLocalError
+    # from Python treating them as local due to the assignment in the RAG branch).
+    tools = globals()['tools']
+    available_functions = globals()['available_functions']
+    
+    # ================================================================
+    # MESSAGE STRATEGY: system (every turn) + developer (periodic)
+    # ================================================================
+    # system role (highest priority): behavioral rules + RAG chunks (if RAG)
+    #   → Sent on EVERY API call for maximum adherence
+    # developer role: base modules (DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG)
+    #   → Sent on msg 1, then every 3rd (3, 6, 9...) + on rotation/recovery
+    #   → Also sent if conversation is stale (>15 min since last response)
+    #   → Persists via previous_response_id between refreshes
+    # ================================================================
+    should_send_developer = (current_message_count == 1 or current_message_count % 3 == 0)
+    
+    # Staleness check: re-send developer if >15 min since last assistant response
+    # This covers pre-existing conversations and long gaps where context may drift
+    if not should_send_developer:
+        from .thread_store import get_last_updated_timestamp
+        last_updated_str = get_last_updated_timestamp(user_identifier)
+        if last_updated_str:
+            try:
+                last_updated = datetime.fromisoformat(last_updated_str)
+                if datetime.utcnow() - last_updated > timedelta(minutes=15):
+                    should_send_developer = True
+                    logger.info(f"[MSG_STRATEGY] Stale conversation detected ({last_updated_str}), forcing developer refresh")
+            except (ValueError, TypeError):
+                pass  # Malformed timestamp — skip staleness check
+    
+    # Build developer_message (base modules — periodic)
     if config.RAG_ENABLED:
-        # RAG path: always-on core + semantically retrieved chunks
-        # Lazy imports to avoid affecting production when RAG_ENABLED=False
+        # RAG path: always-on core as developer message
         from .rag.always_on_core import get_core_prompt
         from .rag.retriever import retrieve
-        core_prompt = get_core_prompt()
-        # Extract the raw user message for retrieval — the full `message` may
-        # include missed-messages context prepended by main.py, which would
-        # pollute the embedding query.  The actual user text comes after the
-        # "=== FIN DE MENSAJES PERDIDOS ===" footer when present.
-        _rag_query = message
-        _missed_footer = "=== FIN DE MENSAJES PERDIDOS ==="
-        if _missed_footer in message:
-            _rag_query = message.split(_missed_footer, 1)[1].strip()
-        retrieved_chunks = await retrieve(_rag_query)
-        system_instructions = core_prompt + "\n\n=== RELEVANT MODULE CONTENT ===\n" + retrieved_chunks
-        logger.info(
-            f"[RAG] System prompt built: {len(system_instructions):,} chars "
-            f"(core: {len(core_prompt):,}, retrieved: {len(retrieved_chunks):,})"
-        )
+        developer_base_modules = get_core_prompt()
+        # RAG replaces load_additional_modules entirely — remove it from tools
+        tools = [t for t in tools if t.get("name") != "load_additional_modules"]
+        available_functions = {k: v for k, v in available_functions.items() if k != "load_additional_modules"}
+        logger.info(f"[RAG] Removed load_additional_modules from tools ({len(globals()['tools'])} → {len(tools)} tools)")
     else:
-        system_instructions = build_classification_system_prompt()
+        # Non-RAG path: classification prompt with module-loading instructions
+        developer_base_modules = build_classification_system_prompt()
     
-    # Log token optimization
-    try:
-        with open('app/resources/system_instructions.txt', 'r', encoding='utf-8') as f:
-            original_size = len(f.read())
-        base_size = len(system_instructions)
-        initial_reduction = ((original_size - base_size) / original_size) * 100
-        logger.info(f"[DYNAMIC_LOADING] Base modules loaded: {base_size} chars, Initial reduction: {initial_reduction:.1f}%")
-    except Exception as e:
-        logger.info(f"[DYNAMIC_LOADING] Using dynamic loading with base size: {len(system_instructions)} chars")
-    
-    # Build the contextualized developer message - GPT-5.1 optimized patterns from OpenAI Cookbook
+    # Build behavioral rules (becomes system message — sent every turn)
     contextualized_message = (
         # GPT-5.1 SOLUTION PERSISTENCE - Official OpenAI pattern for agentic completion
         "<solution_persistence>\n"
@@ -1756,8 +1851,10 @@ async def get_openai_response(
         "</tool_planning>\n\n"
         
         f"Current date/time (El Salvador, GMT-6): {datetime_str}.\n"
-        "Load modules via load_additional_modules based on decision_tree and module_dependencies in CORE_CONFIG.\n\n"
-        
+        + ("All relevant module content has been pre-loaded in the system prompt. Use the pre-loaded protocols directly — do NOT look for a module-loading tool.\n\n"
+           if config.RAG_ENABLED else
+           "Load modules via load_additional_modules based on decision_tree and module_dependencies in CORE_CONFIG.\n\n")
+        +
         # GPT-5.1 TOOL USAGE RULES - With examples as recommended by OpenAI
         "<tool_usage_rules>\n"
         "When customer provides date + people + member status → call get_price_for_date and give price IN THIS TURN.\n"
@@ -1797,6 +1894,8 @@ async def get_openai_response(
         "Before claiming a payment was found/not found → verify you called the validation tool.\n"
         "Before confirming a booking → verify you called make_booking and received confirmation.\n"
         "Before stating any policy → verify it exists in loaded modules. If uncertain, load modules first.\n"
+        "Before mentioning what weekday a date falls on → double-check by counting from today's date/weekday above.\n"
+        "Before telling a customer a date doesn't exist → double-check by counting from today's date above.\n"
         "</verification_rules>\n\n"
         
         # GPT-5.1 FORBIDDEN BEHAVIORS - Clear alternatives prevent deviation
@@ -1830,6 +1929,35 @@ async def get_openai_response(
         "5. NEVER say 'sí hay disponibilidad' and send payment link if count is insufficient!\n"
         "Example: Customer needs 3 Junior, check_room_availability_counts shows bungalow_junior=2 → DO NOT quote or send payment link. Inform: 'Solo tenemos 2 Junior disponibles. ¿Prefieren combinar con Habitación o buscar otra fecha?'\n"
         "</multi_room_count_verification>"
+    )
+
+    # ================================================================
+    # Build final system_message (every turn) and developer_message (periodic)
+    # ================================================================
+    if config.RAG_ENABLED:
+        # RAG path: system = behavioral rules + retrieved chunks
+        _rag_query = message
+        _missed_footer = "=== FIN DE MENSAJES PERDIDOS ==="
+        if _missed_footer in message:
+            _rag_query = message.split(_missed_footer, 1)[1].strip()
+        retrieved_chunks = await retrieve(_rag_query)
+        system_message = contextualized_message + "\n\n=== RELEVANT MODULE CONTENT ===\n" + retrieved_chunks
+        logger.info(
+            f"[RAG] System message built: {len(system_message):,} chars "
+            f"(behavioral: {len(contextualized_message):,}, retrieved: {len(retrieved_chunks):,})"
+        )
+    else:
+        # Non-RAG path: system = behavioral rules only
+        system_message = contextualized_message
+
+    # developer_message is only set when it should be sent (msg 1, 3, 6, 9...)
+    developer_message = developer_base_modules if should_send_developer else None
+    
+    logger.info(
+        f"[MSG_STRATEGY] Message {current_message_count}: "
+        f"system={'RAG' if config.RAG_ENABLED else 'behavioral'}({len(system_message):,} chars)"
+        + (f", developer=base_modules({len(developer_base_modules):,} chars)" if should_send_developer 
+           else f", developer=SKIPPED (persisted, next refresh at msg {current_message_count + (3 - current_message_count % 3) % 3})")
     )
 
     # Check for PENDING bookings that need processing
@@ -2009,37 +2137,10 @@ async def get_openai_response(
             # The missed messages are already prepended to the user_message before this function is called
             # This prevents the race condition where the timestamp is updated before the check
             
-            # Use regular developer message (missed messages already in user_message if applicable)
-            enhanced_developer_message = contextualized_message
-            
-            # SECOND API CALL: Send normal message (system + developer + user)
-            # Always use previous_response_id to avoid stale tool call conflicts
-            
-            # ALWAYS send system_instructions on every call - OpenAI's automatic prompt caching
-            # will cache the prefix (system instructions + tools) at 50% discount after first call.
-            # This ensures instructions are ALWAYS present and prevents model from "forgetting" rules.
-            logger.info(f"[PROMPT_CACHING] Sending system_instructions at message {current_message_count} ({'RAG' if config.RAG_ENABLED else 'legacy'}, always sent - OpenAI caches automatically)")
+            # MAIN API CALL: system (every turn) + developer (periodic) + user
+            input_messages = _build_input_messages(system_message, message, developer_message)
             
             if previous_response_id:
-                # Continue from existing response - always include system instructions
-                input_messages = [
-                    {
-                        "type": "message",
-                        "role": "system",
-                        "content": [{"type": "input_text", "text": system_instructions}]
-                    },
-                    {
-                        "type": "message", 
-                        "role": "developer",
-                        "content": [{"type": "input_text", "text": enhanced_developer_message}]
-                    },
-                    {
-                        "type": "message",
-                        "role": "user", 
-                        "content": [{"type": "input_text", "text": message}]
-                    }
-                ]
-                
                 response = await _make_responses_call(
                     use_flex=True,
                     user_identifier=user_identifier,
@@ -2052,29 +2153,12 @@ async def get_openai_response(
                 logger.info(f"[OpenAI] Continued from response {previous_response_id}")
             else:
                 # New conversation - use conversation parameter only for the very first call
-                # Always send system_instructions on first call
                 response = await _make_responses_call(
                     use_flex=True,
                     user_identifier=user_identifier,
                     model="gpt-5.1",
                     conversation=conversation_id,
-                    input=[
-                        {
-                            "type": "message",
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": system_instructions}]
-                        },
-                        {
-                            "type": "message", 
-                            "role": "developer",
-                            "content": [{"type": "input_text", "text": enhanced_developer_message}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "user", 
-                            "content": [{"type": "input_text", "text": message}]
-                        }
-                    ],
+                    input=input_messages,
                     tools=tools,
                     max_output_tokens=4000
                 )
@@ -2131,31 +2215,16 @@ async def get_openai_response(
                     save_response_id(user_identifier, agent_response.id)
                     logger.info(f"[AGENT_CONTEXT] Agent context injected, response_id={agent_response.id}")
                     
-                    logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh recovery conversation)")
+                    logger.info(f"[MSG_STRATEGY] Fresh recovery with context at message {current_message_count}: sending system + developer")
                     
                     # RESTART THE ENTIRE FLOW with fresh conversation
-                    input_messages = [
-                        {
-                            "type": "message",
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": system_instructions}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "developer", 
-                            "content": [{"type": "input_text", "text": contextualized_message}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "user", 
-                            "content": [{"type": "input_text", "text": message}]
-                        }
-                    ]
+                    # Fresh start → always send developer (msg count reset to 1)
+                    recovery_input = _build_input_messages(system_message, message, developer_base_modules)
                     
                     response = await openai_client.responses.create(
                         model="gpt-5.1",
                         previous_response_id=agent_response.id,
-                        input=input_messages,
+                        input=recovery_input,
                         tools=tools,
                         max_output_tokens=4000
                     )
@@ -2166,29 +2235,13 @@ async def get_openai_response(
                 else:
                     # No agent context available - make API call directly, let OpenAI create conversation
                     logger.info(f"[AGENT_CONTEXT] No agent context available, creating fresh conversation")
-                    
-                    logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (fresh conversation without context)")
+                    logger.info(f"[MSG_STRATEGY] Fresh recovery without context at message {current_message_count}: sending system + developer")
                     
                     # DON'T pass conversation parameter - let OpenAI create a new one
+                    # Fresh start → always send developer (msg count reset to 1)
                     response = await openai_client.responses.create(
                         model="gpt-5.1",
-                        input=[
-                            {
-                                "type": "message",
-                                "role": "system",
-                                "content": [{"type": "input_text", "text": system_instructions}]
-                            },
-                            {
-                                "type": "message",
-                                "role": "developer", 
-                                "content": [{"type": "input_text", "text": contextualized_message}]
-                            },
-                            {
-                                "type": "message",
-                                "role": "user", 
-                                "content": [{"type": "input_text", "text": message}]
-                            }
-                        ],
+                        input=_build_input_messages(system_message, message, developer_base_modules),
                         tools=tools,
                         max_output_tokens=4000
                     )
@@ -2229,8 +2282,9 @@ async def get_openai_response(
                 # ================================================================
                 # FLEX TIER SWITCHING LOGIC
                 # ================================================================
-                # load_additional_modules is safe for Flex (just reads local files)
-                # All other tools require Standard tier for reliability
+                # When RAG is enabled, load_additional_modules is removed so the
+                # first tool call will always be a real tool needing Standard tier.
+                # When RAG is disabled, load_additional_modules is safe for Flex.
                 if fn_name != "load_additional_modules":
                     if current_tier_is_flex:
                         logger.info(f"[TIER] Tool '{fn_name}' detected, switching to Standard tier for rest of chain")
@@ -2306,6 +2360,11 @@ async def get_openai_response(
                 except Exception as e:
                     logger.exception(f"Error executing tool {fn_name}")
                     output = _coerce_output_str({"error": f"Error executing {fn_name}: {str(e)}"})
+
+                # Inject occupancy_rules into availability tool responses so the
+                # model always has room capacity constraints when deciding room types.
+                if fn_name in ('check_room_availability', 'check_smart_availability', 'check_room_availability_counts'):
+                    output += "\n\n🚨 OCCUPANCY RULES (MUST follow before offering ANY room type):\n" + _get_occupancy_rules()
 
                 tool_output_input.append({
                     "type": "function_call_output",
@@ -2420,57 +2479,27 @@ async def get_openai_response(
                         save_response_id(user_identifier, agent_response.id)
                         logger.info(f"[AGENT_CONTEXT] Agent context injected for fresh recovery conversation {conversation_id}")
                         
-                        logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (tool error recovery with context)")
+                        logger.info(f"[MSG_STRATEGY] Tool error recovery with context at message {current_message_count}: sending system + developer")
                         
-                        # RESTART THE ENTIRE FLOW with fresh conversation - use previous_response_id after context
+                        # RESTART THE ENTIRE FLOW with fresh conversation
+                        # Fresh start → always send developer (msg count reset to 1)
                         response = await openai_client.responses.create(
                             model="gpt-5.1",
                             previous_response_id=agent_response.id,
-                            input=[
-                                {
-                                    "type": "message",
-                                    "role": "system",
-                                    "content": [{"type": "input_text", "text": system_instructions}]
-                                },
-                                {
-                                    "type": "message",
-                                    "role": "developer", 
-                                    "content": [{"type": "input_text", "text": contextualized_message}]
-                                },
-                                {
-                                    "type": "message",
-                                    "role": "user", 
-                                    "content": [{"type": "input_text", "text": message}]
-                                }
-                            ],
+                            input=_build_input_messages(system_message, message, developer_base_modules),
                             tools=tools,
                             max_output_tokens=4000
                         )
                     else:
                         # No agent context - send directly with conversation ID
                         logger.info(f"[AGENT_CONTEXT] No agent context available for fresh recovery conversation {conversation_id}")
-                        logger.info(f"[PROMPT_CACHING] Sending base_modules at message {current_message_count} (tool error recovery without context)")
+                        logger.info(f"[MSG_STRATEGY] Tool error recovery without context at message {current_message_count}: sending system + developer")
                         
+                        # Fresh start → always send developer (msg count reset to 1)
                         response = await openai_client.responses.create(
                             model="gpt-5.1",
                             conversation=conversation_id,
-                            input=[
-                                {
-                                    "type": "message",
-                                    "role": "system",
-                                    "content": [{"type": "input_text", "text": system_instructions}]
-                                },
-                                {
-                                    "type": "message",
-                                    "role": "developer", 
-                                    "content": [{"type": "input_text", "text": contextualized_message}]
-                                },
-                                {
-                                    "type": "message",
-                                    "role": "user", 
-                                    "content": [{"type": "input_text", "text": message}]
-                                }
-                            ],
+                            input=_build_input_messages(system_message, message, developer_base_modules),
                             tools=tools,
                             max_output_tokens=4000
                         )
@@ -2604,22 +2633,11 @@ async def get_openai_response(
             await asyncio.sleep(5)
             # Retry once for rate limit
             try:
-                # Rate limit retry - use conversation for simplicity
+                # Rate limit retry - always send developer on retry (recovery path)
                 response = await openai_client.responses.create(
                     model="gpt-5.1",
                     conversation=conversation_id,
-                    input=[
-                        {
-                            "type": "message",
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": system_instructions}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": message}]
-                        }
-                    ],
+                    input=_build_input_messages(system_message, message, developer_base_modules),
                     tools=tools
                 )
                 # Save rate limit retry response ID
@@ -2636,7 +2654,7 @@ async def get_openai_response(
             logger.warning(f"[THREAD_ROTATION] Context window exceeded for {user_identifier}, rotating to new conversation thread")
             try:
                 logger.info(f"[THREAD_ROTATION] Calling rotate_conversation_thread for {user_identifier}")
-                new_conversation_id = await rotate_conversation_thread(conversation_id, user_identifier, contextualized_message, system_instructions)
+                new_conversation_id = await rotate_conversation_thread(conversation_id, user_identifier, contextualized_message, developer_base_modules)
                 logger.info(f"[THREAD_ROTATION] rotate_conversation_thread returned: {new_conversation_id}")
                 if new_conversation_id:
                     # CRITICAL: Clear old response ID to prevent using old conversation's response

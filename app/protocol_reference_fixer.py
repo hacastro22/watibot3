@@ -33,7 +33,8 @@ REFERENCE_MAPPINGS = {
     "MODULE_1_CRITICAL_WORKFLOWS.member_handling_protocol.initial_redirection_script": "MODULE_1_CRITICAL_WORKFLOWS.member_handling.initial_redirection_script",
     
     # MODULE_2A_PACKAGE_CONTENT - protocol name changes
-    "MODULE_2A_PACKAGE_CONTENT.package_content_inquiry_protocol": "MODULE_2A_PACKAGE_CONTENT.package_inquiry",
+    "MODULE_2A_PACKAGE_CONTENT.package_content_inquiry_protocol": "MODULE_2A_PACKAGE_CONTENT.package_details",
+    "MODULE_2A_PACKAGE_CONTENT.package_inquiry": "MODULE_2A_PACKAGE_CONTENT.package_details",
     
     # MODULE_2B_PRICE_INQUIRY - nested path changes
     "MODULE_2B_PRICE_INQUIRY.daypass_sales_protocol.weekend_inquiry_protocol": "MODULE_2B_PRICE_INQUIRY.daypass_sales_protocol.weekend_inquiry",
@@ -54,17 +55,30 @@ REFERENCE_MAPPINGS = {
     "MODULE_4_INFORMATION.general_policies": "MODULE_4_INFORMATION.policies_basic",
     "MODULE_4_INFORMATION.general_policies.cooking_policy": "MODULE_4_INFORMATION.policies_basic.cooking",
     "MODULE_4_INFORMATION.hotel_capacity_query_protocol": "MODULE_4_INFORMATION.capacity_query",
-    "MODULE_4_INFORMATION.hotel_information.check_in_out_policy": "MODULE_4_INFORMATION.hotel_information.check_in_out",
-    "MODULE_4_INFORMATION.hotel_information.contact_info": "MODULE_4_INFORMATION.hotel_information.contact",
+    # hotel_information was split into hotel_location_access, hotel_checkin_policies, hotel_restaurant_menu, hotel_rooms_facilities
+    "MODULE_4_INFORMATION.hotel_information": "MODULE_4_INFORMATION.hotel_location_access",
+    "MODULE_4_INFORMATION.hotel_information.check_in_out_policy": "MODULE_4_INFORMATION.hotel_checkin_policies.check_in_out",
+    "MODULE_4_INFORMATION.hotel_information.check_in_out": "MODULE_4_INFORMATION.hotel_checkin_policies.check_in_out",
+    "MODULE_4_INFORMATION.hotel_information.contact_info": "MODULE_4_INFORMATION.hotel_location_access.contact",
+    "MODULE_4_INFORMATION.hotel_information.contact": "MODULE_4_INFORMATION.hotel_location_access.contact",
     "MODULE_4_INFORMATION.hotel_information.facilities": "MODULE_4_INFORMATION.facilities",
-    "MODULE_4_INFORMATION.hotel_information.general_regulations.pet_policy": "MODULE_4_INFORMATION.hotel_information.regulations.pets",
-    "MODULE_4_INFORMATION.hotel_information.location.access_route_protocol": "MODULE_4_INFORMATION.hotel_information.location.access_route_script",
-    "MODULE_4_INFORMATION.hotel_information.menu_information_protocol": "MODULE_4_INFORMATION.hotel_information.menu_protocol",
-    "MODULE_4_INFORMATION.hotel_information.pool_rules": "MODULE_4_INFORMATION.hotel_information.pool",
-    "MODULE_4_INFORMATION.hotel_information.restaurant_hours": "MODULE_4_INFORMATION.hotel_information.restaurant.hours",
-    "MODULE_4_INFORMATION.hotel_information.towel_policy": "MODULE_4_INFORMATION.hotel_information.towels",
-    "MODULE_4_INFORMATION.hotel_information.weekend_entertainment_schedule": "MODULE_4_INFORMATION.hotel_information.weekend_entertainment",
-    "MODULE_4_INFORMATION.hotel_information.wifi_policy": "MODULE_4_INFORMATION.hotel_information.wifi",
+    "MODULE_4_INFORMATION.hotel_information.general_regulations.pet_policy": "MODULE_4_INFORMATION.hotel_checkin_policies.regulations.pets",
+    "MODULE_4_INFORMATION.hotel_information.regulations": "MODULE_4_INFORMATION.hotel_checkin_policies.regulations",
+    "MODULE_4_INFORMATION.hotel_information.location": "MODULE_4_INFORMATION.hotel_location_access.location",
+    "MODULE_4_INFORMATION.hotel_information.location.access_route_protocol": "MODULE_4_INFORMATION.hotel_location_access.location.access_route_script",
+    "MODULE_4_INFORMATION.hotel_information.location.access_route_script": "MODULE_4_INFORMATION.hotel_location_access.location.access_route_script",
+    "MODULE_4_INFORMATION.hotel_information.menu_information_protocol": "MODULE_4_INFORMATION.hotel_restaurant_menu.menu_protocol",
+    "MODULE_4_INFORMATION.hotel_information.menu_protocol": "MODULE_4_INFORMATION.hotel_restaurant_menu.menu_protocol",
+    "MODULE_4_INFORMATION.hotel_information.pool_rules": "MODULE_4_INFORMATION.hotel_rooms_facilities.pool",
+    "MODULE_4_INFORMATION.hotel_information.pool": "MODULE_4_INFORMATION.hotel_rooms_facilities.pool",
+    "MODULE_4_INFORMATION.hotel_information.restaurant_hours": "MODULE_4_INFORMATION.hotel_restaurant_menu.restaurant.hours",
+    "MODULE_4_INFORMATION.hotel_information.restaurant": "MODULE_4_INFORMATION.hotel_restaurant_menu.restaurant",
+    "MODULE_4_INFORMATION.hotel_information.towel_policy": "MODULE_4_INFORMATION.hotel_checkin_policies.towels",
+    "MODULE_4_INFORMATION.hotel_information.towels": "MODULE_4_INFORMATION.hotel_checkin_policies.towels",
+    "MODULE_4_INFORMATION.hotel_information.weekend_entertainment_schedule": "MODULE_4_INFORMATION.hotel_rooms_facilities.weekend_entertainment",
+    "MODULE_4_INFORMATION.hotel_information.weekend_entertainment": "MODULE_4_INFORMATION.hotel_rooms_facilities.weekend_entertainment",
+    "MODULE_4_INFORMATION.hotel_information.wifi_policy": "MODULE_4_INFORMATION.hotel_rooms_facilities.wifi",
+    "MODULE_4_INFORMATION.hotel_information.wifi": "MODULE_4_INFORMATION.hotel_rooms_facilities.wifi",
     "MODULE_4_INFORMATION.invitational_event_query_protocol": "MODULE_4_INFORMATION.invitational_event",
     "MODULE_4_INFORMATION.job_inquiry_protocol": "MODULE_4_INFORMATION.job_inquiry",
     "MODULE_4_INFORMATION.lost_and_found_protocol": "MODULE_4_INFORMATION.lost_and_found",
@@ -75,7 +89,11 @@ REFERENCE_MAPPINGS = {
     "accommodations.bungalow_occupancy": "MODULE_4_INFORMATION.accommodations.occupancy_calc",
     "accommodations.room_details": "MODULE_4_INFORMATION.accommodations.types",
     "accommodation_suggestion_logic": "MODULE_4_INFORMATION.accommodations.priority",
-    "payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods",
+    # payment_methods was split into payment_methods_overview and credit_card_payment_protocol
+    "payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview",
+    "MODULE_2B_PRICE_INQUIRY.payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview",
+    "MODULE_2B_PRICE_INQUIRY.payment_methods.bank_deposit_info": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview.bank_deposit_info",
+    "MODULE_2B_PRICE_INQUIRY.payment_methods.credit_card_payment_protocol": "MODULE_2B_PRICE_INQUIRY.credit_card_payment_protocol",
     "payment_objection_handling_protocol": "MODULE_2B_PRICE_INQUIRY.payment_objection_handling_protocol",
     
     # CORE_CONFIG shorthand references (MODULE_1 → MODULE_1_CRITICAL_WORKFLOWS)
@@ -83,11 +101,17 @@ REFERENCE_MAPPINGS = {
     "MODULE_1.member_handling_protocol.initial_redirection_script": "MODULE_1_CRITICAL_WORKFLOWS.member_handling.initial_redirection_script",
     
     # MODULE_2D references
-    "MODULE_2D.holiday_activities_protocol": "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_protocol",
+    # holiday_activities_protocol was split into holiday_activities_rules and holiday_resort_schedule
+    "MODULE_2D.holiday_activities_protocol": "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_rules",
+    "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_protocol": "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_rules",
+    # multi_room_booking_protocol was split into multi_room_booking_rules and multi_room_booking_examples
+    "MODULE_2B_PRICE_INQUIRY.multi_room_booking_protocol": "MODULE_2B_PRICE_INQUIRY.multi_room_booking_rules",
+    # promotion_rules was split into pasadia_5x4_promotion and promotion_inquiry_protocol
+    "MODULE_4_INFORMATION.promotion_rules": "MODULE_4_INFORMATION.promotion_inquiry_protocol",
     
     # Shorthand module prefixes (MODULE_2B → MODULE_2B_PRICE_INQUIRY, MODULE_4 → MODULE_4_INFORMATION)
-    "MODULE_2B.bank_deposit_info": "MODULE_2B_PRICE_INQUIRY.payment_methods.bank_deposit_info",
-    "MODULE_4.hotel_information.location": "MODULE_4_INFORMATION.hotel_information.location",
+    "MODULE_2B.bank_deposit_info": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview.bank_deposit_info",
+    "MODULE_4.hotel_information.location": "MODULE_4_INFORMATION.hotel_location_access.location",
 }
 
 

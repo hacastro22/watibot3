@@ -14,8 +14,7 @@ import os
 import logging
 import asyncio
 import random
-import threading
-import time
+import mysql.connector
 from datetime import datetime, timedelta
 from pytz import timezone
 import holidays
@@ -44,119 +43,117 @@ EL_SALVADOR_HOLIDAYS = holidays.country_holidays('SV')
 # NOTE: "Doble" is normalized to "Habitación" by _normalize_bungalow_type(), so no separate entry needed
 ROOM_CAPACITY = {
     "Familiar": {"min_occupancy": 5, "max_occupancy": 8},    # Rooms 1-17
-    "Junior": {"min_occupancy": 2, "max_occupancy": 8},      # Rooms 18-59
-    "Habitación": {"min_occupancy": 2, "max_occupancy": 4},  # Rooms 1A-14A (also called "Doble")
+    "Junior": {"min_occupancy": 1, "max_occupancy": 8},      # Rooms 18-59 (+$20/room/night if adults==1 AND children_6_10<2)
+    "Habitación": {"min_occupancy": 1, "max_occupancy": 4},  # Rooms 1A-14A (also called "Doble") (+$20/room/night if adults==1 AND children_6_10<2)
     "Matrimonial": {"min_occupancy": 2, "max_occupancy": 2}, # Junior subset: 22,42,47,48,53
     "Pasadía": {"min_occupancy": 0, "max_occupancy": 999}    # No room capacity for day pass
 }
 
-# Booking lock to prevent duplicate bookings from concurrent requests
-_booking_locks = {}  # Per-customer locks
-_booking_locks_mutex = threading.Lock()  # Protects the locks dictionary
-_used_authorizations = {}  # Track recently used authorization codes {auth_code: (wa_id, timestamp)}
-_used_authorizations_mutex = threading.Lock()
-AUTHORIZATION_COOLDOWN_SECONDS = 300  # 5 minutes - prevent same auth code reuse
-
-def _get_booking_lock(wa_id: str) -> threading.Lock:
-    """Get or create a lock for a specific customer."""
-    with _booking_locks_mutex:
-        if wa_id not in _booking_locks:
-            _booking_locks[wa_id] = threading.Lock()
-        return _booking_locks[wa_id]
-
-def _check_authorization_duplicate(auth_code: str, wa_id: str) -> tuple:
-    """
-    Check if authorization code was recently used (does NOT mark as used).
-    Returns (is_duplicate, message).
-    """
-    if not auth_code:
-        return False, ""
-    
-    current_time = time.time()
-    auth_key = auth_code.strip().upper()
-    
-    with _used_authorizations_mutex:
-        # Clean old entries (older than cooldown)
-        expired = [k for k, v in _used_authorizations.items() 
-                   if current_time - v[1] > AUTHORIZATION_COOLDOWN_SECONDS]
-        for k in expired:
-            del _used_authorizations[k]
-        
-        # Check if this auth code was recently used
-        if auth_key in _used_authorizations:
-            prev_wa_id, prev_time = _used_authorizations[auth_key]
-            age_seconds = current_time - prev_time
-            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Authorization {auth_code} was used {age_seconds:.0f}s ago for {prev_wa_id}")
-            return True, f"Authorization code {auth_code} was already used for a booking"
-        
-        return False, ""
-
+# DUPLICATE BOOKING PREVENTION: Database-based lock using booking_locks table.
+# Uses MySQL INSERT with PRIMARY KEY for atomic cross-process locking.
+# Replaces the old in-memory dict which was process-local and didn't work
+# across uvicorn worker processes (root cause of duplicate booking 28201/28202).
 
 def _reserve_authorization_atomic(auth_code: str, wa_id: str) -> tuple:
     """
-    ATOMIC check-and-reserve: Check if authorization is available AND reserve it in one operation.
-    This prevents race conditions where two workers both pass the check before either marks it.
+    ATOMIC check-and-reserve using MySQL booking_locks table.
+    INSERT with PRIMARY KEY fails atomically if another worker already locked this payment.
+    Works across all uvicorn worker processes (unlike the old in-memory dict).
     Returns (success, message). If success=False, another booking is using this auth.
     """
     if not auth_code:
         return True, ""
     
-    current_time = time.time()
-    auth_key = auth_code.strip().upper()
-    
-    with _used_authorizations_mutex:
-        # Clean old entries (older than cooldown)
-        expired = [k for k, v in _used_authorizations.items() 
-                   if current_time - v[1] > AUTHORIZATION_COOLDOWN_SECONDS]
-        for k in expired:
-            del _used_authorizations[k]
-        
-        # Check if this auth code was recently used
-        if auth_key in _used_authorizations:
-            prev_wa_id, prev_time = _used_authorizations[auth_key]
-            age_seconds = current_time - prev_time
-            logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] Authorization {auth_code} already reserved {age_seconds:.0f}s ago for {prev_wa_id}")
-            return False, f"Authorization code {auth_code} was already used for a booking"
-        
-        # ATOMICALLY reserve it NOW before making the API call
-        _used_authorizations[auth_key] = (wa_id, current_time)
-        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RESERVED authorization {auth_code} for {wa_id} (will release if booking fails)")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # Clean stale locks older than 10 minutes (handles crashed workers)
+        cursor.execute("DELETE FROM booking_locks WHERE locked_at < NOW() - INTERVAL 10 MINUTE")
+        # Atomic claim: INSERT fails with IntegrityError if payment_ref already exists
+        cursor.execute(
+            "INSERT INTO booking_locks (payment_ref, wa_id) VALUES (%s, %s)",
+            (auth_code, wa_id)
+        )
+        conn.commit()
+        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RESERVED {auth_code} for {wa_id} in booking_locks (will release if booking fails)")
         return True, ""
+    except mysql.connector.IntegrityError:
+        conn.rollback()
+        logger.warning(f"[DUPLICATE_BOOKING_PREVENTION] {auth_code} already locked in booking_locks — blocking duplicate for {wa_id}")
+        return False, f"Payment {auth_code} is already being used for a booking"
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[DUPLICATE_BOOKING_PREVENTION] DB error reserving {auth_code}: {e}")
+        # On DB error, allow booking to proceed (fail-open) rather than blocking legitimate bookings
+        return True, ""
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _release_authorization(auth_code: str, wa_id: str) -> None:
     """
     Release a reserved authorization if booking fails.
-    Only releases if the reservation belongs to the same wa_id.
+    Deletes the lock row only if it belongs to the same wa_id.
     """
     if not auth_code:
         return
     
-    auth_key = auth_code.strip().upper()
-    
-    with _used_authorizations_mutex:
-        if auth_key in _used_authorizations:
-            reserved_wa_id, _ = _used_authorizations[auth_key]
-            if reserved_wa_id == wa_id:
-                del _used_authorizations[auth_key]
-                logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RELEASED authorization {auth_code} for {wa_id} (booking failed)")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM booking_locks WHERE payment_ref = %s AND wa_id = %s",
+            (auth_code, wa_id)
+        )
+        conn.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"[DUPLICATE_BOOKING_PREVENTION] RELEASED {auth_code} for {wa_id} (booking failed)")
+    except Exception as e:
+        logger.error(f"[DUPLICATE_BOOKING_PREVENTION] DB error releasing {auth_code}: {e}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _mark_authorization_used(auth_code: str, wa_id: str) -> None:
     """
-    Mark authorization code as used AFTER successful booking.
-    Should only be called after booking is confirmed successful.
-    Note: With atomic reservation, the auth is already in the dict, this just logs confirmation.
+    Remove lock after successful booking.
+    The payment record's codreser column (set by _update_payment_record) serves as
+    the permanent "used" marker. The lock row is just for the booking-in-progress window.
     """
     if not auth_code:
         return
     
-    auth_key = auth_code.strip().upper()
-    current_time = time.time()
-    
-    with _used_authorizations_mutex:
-        _used_authorizations[auth_key] = (wa_id, current_time)
-        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] CONFIRMED authorization {auth_code} as used for {wa_id}")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM booking_locks WHERE payment_ref = %s", (auth_code,))
+        conn.commit()
+        logger.info(f"[DUPLICATE_BOOKING_PREVENTION] CONFIRMED {auth_code} used for {wa_id} — lock removed")
+    except Exception as e:
+        logger.error(f"[DUPLICATE_BOOKING_PREVENTION] DB error confirming {auth_code}: {e}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # Shared Normalization and Assistant Classification Functions
 
@@ -464,8 +461,8 @@ async def _get_multiple_rooms(
             
             capacity_rules = {
                 'bungalow_familiar': (5, 8),
-                'bungalow_junior': (2, 8),
-                'habitacion': (2, 4),
+                'bungalow_junior': (1, 8),
+                'habitacion': (1, 4),
             }
             type_display_names = {
                 'bungalow_familiar': 'Bungalow Familiar',
@@ -688,7 +685,7 @@ async def make_multi_room_booking(
         }
     
     # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
-    payment_ref = authorization_number or transfer_id
+    payment_ref = f"CC_{authorization_number}" if authorization_number else (f"BAC_{transfer_id}" if transfer_id else None)
     if payment_ref:
         reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
         if not reserve_success:
@@ -839,6 +836,25 @@ async def make_multi_room_booking(
             selected_rooms = retry_result["rooms"]
             room_details = retry_result["room_details"]
         
+        # Step 3.5: Calculate actual booking total from DB rates (includes surcharges per room)
+        multi_total_result = _calculate_multi_room_booking_total(
+            check_in_date, check_out_date, room_bookings, package_type
+        )
+        if multi_total_result.get("success"):
+            booking_total = multi_total_result["grand_total"]
+            calc_adult_rate = multi_total_result["adult_rate"]
+            calc_child_rate = multi_total_result["child_rate"]
+            if abs(payment_amount - booking_total) > 0.01:
+                logger.warning(
+                    f"[MULTI_ROOM] Price discrepancy: model_payment={payment_amount:.2f}, "
+                    f"calculated={booking_total:.2f}, diff={payment_amount - booking_total:.2f}"
+                )
+        else:
+            logger.error(f"[MULTI_ROOM] Price calc failed: {multi_total_result.get('error')} — falling back to payment_amount")
+            booking_total = payment_amount
+            calc_adult_rate = None
+            calc_child_rate = None
+        
         # Step 4: Format API parameters
         reserverooms = "+".join(str(r) for r in selected_rooms)
         adult_counts = [str(r["adults"]) for r in room_details]
@@ -883,7 +899,10 @@ async def make_multi_room_booking(
             extra_beds=extra_beds,
             extra_beds_cost=extra_beds_cost,
             customer_instructions=customer_instructions,
-            room_count=len(selected_rooms)
+            room_count=len(selected_rooms),
+            booking_total=booking_total,
+            calc_adult_rate=calc_adult_rate,
+            calc_child_rate=calc_child_rate
         )
         
         if not booking_result["success"]:
@@ -1153,7 +1172,7 @@ async def make_booking(
     
     # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
     # This reserves the authorization BEFORE the API call, preventing two workers from both passing
-    payment_ref = authorization_number or transfer_id
+    payment_ref = f"CC_{authorization_number}" if authorization_number else (f"BAC_{transfer_id}" if transfer_id else None)
     if payment_ref:
         reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
         if not reserve_success:
@@ -1247,8 +1266,8 @@ async def make_booking(
             total_occupancy = adults + (children_6_10 * 0.5)
             capacity_rules = {
                 'bungalow_familiar': (5, 8),
-                'bungalow_junior': (2, 8),
-                'habitacion': (2, 4),
+                'bungalow_junior': (1, 8),
+                'habitacion': (1, 4),
             }
             type_display_names = {
                 'bungalow_familiar': 'Bungalow Familiar',
@@ -1534,13 +1553,19 @@ def _calculate_booking_total(
         children_6_10_total = children_6_10 * child_rate * nights
         subtotal = adult_total + children_0_5_total + children_6_10_total
         
+        # Apply Romántico surcharge: +$20/person/night (adults only, no children in Romántico)
+        romantico_surcharge = 0.0
+        if package_type == "Romántico":
+            romantico_surcharge = 20.00 * adults_paying * nights
+            promotion_details["romantico_surcharge"] = romantico_surcharge
+        
         # Apply single occupancy surcharge for accommodation packages (not Pasadía)
         single_occupancy_surcharge = 0.0
-        if package_type != "Pasadía" and adults_paying == 1 and children_0_5 == 0 and children_6_10 == 0:
-            single_occupancy_surcharge = 20.00 * nights  # $20 per night for single occupancy
+        if package_type != "Pasadía" and adults_paying == 1 and children_6_10 < 2:
+            single_occupancy_surcharge = 20.00 * nights  # $20/room/night when adults==1 AND children_6_10<2
             promotion_details["single_occupancy_surcharge"] = single_occupancy_surcharge
         
-        total_amount = subtotal + single_occupancy_surcharge
+        total_amount = subtotal + romantico_surcharge + single_occupancy_surcharge
         
         breakdown = {
             "adults": adults,
@@ -1555,6 +1580,7 @@ def _calculate_booking_total(
             "children_0_5_total": children_0_5_total,
             "children_6_10_total": children_6_10_total,
             "subtotal_before_surcharges": subtotal,
+            "romantico_surcharge": romantico_surcharge,
             "single_occupancy_surcharge": single_occupancy_surcharge,
             "total_amount": total_amount,
             "promotion_applied": promotion_details,
@@ -1563,10 +1589,13 @@ def _calculate_booking_total(
         
         logger.info(f"Calculated booking total for {package_type}: ${total_amount:.2f} (breakdown: {breakdown})")
         
+        # Effective adult rate for API's adultrate field (includes Romántico +$20)
+        effective_adult_rate = adult_rate + 20.00 if package_type == "Romántico" else adult_rate
+        
         return {
             "success": True,
             "total_amount": total_amount,
-            "adult_rate": adult_rate,
+            "adult_rate": effective_adult_rate,
             "child_rate": child_rate,
             "breakdown": breakdown
         }
@@ -1577,6 +1606,151 @@ def _calculate_booking_total(
             "success": False,
             "error": f"Calculation error: {str(e)}"
         }
+
+
+def _calculate_multi_room_booking_total(
+    check_in_date: str, check_out_date: str,
+    room_bookings: List[Dict[str, Any]], package_type: str
+) -> dict:
+    """
+    Calculate the actual total booking cost for a multi-room booking using database rates.
+    Fetches rates once for all nights, then applies per-room surcharges independently.
+    NOTE: Extra bed costs are NOT included - they are charged at reception.
+
+    Args:
+        check_in_date: Check-in date in YYYY-MM-DD format
+        check_out_date: Check-out date in YYYY-MM-DD format
+        room_bookings: List of room configs, each with adults, children_0_5, children_6_10
+        package_type: Package type (Las Hojas, Escapadita, Romántico)
+
+    Returns:
+        dict: {
+            "success": bool,
+            "grand_total": float,
+            "adult_rate": float (effective, includes Romántico +$20 if applicable),
+            "child_rate": float,
+            "per_room_breakdown": list,
+            "rates_per_night": list,
+            "error": str (if failed)
+        }
+    """
+    try:
+        package_rate_map = {
+            "Las Hojas": {"adult_field": "lh_adulto", "child_field": "lh_nino"},
+            "Escapadita": {"adult_field": "es_adulto", "child_field": "es_nino"},
+            "Romántico": {"adult_field": "lh_adulto", "child_field": "lh_nino"},
+        }
+
+        if package_type not in package_rate_map:
+            return {"success": False, "error": f"Unknown package type for multi-room: {package_type}"}
+
+        rate_fields = package_rate_map[package_type]
+
+        check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
+        check_out_dt = datetime.strptime(check_out_date, "%Y-%m-%d")
+        nights = max(1, (check_out_dt - check_in_dt).days)
+
+        # Step 1: Fetch nightly rates ONCE (same dates for all rooms)
+        adult_rates_sum = 0.0
+        child_rates_sum = 0.0
+        rates_per_night = []
+
+        for night_offset in range(nights):
+            current_night = check_in_dt + timedelta(days=night_offset)
+            current_night_str = current_night.strftime("%Y-%m-%d")
+
+            pricing_data = get_price_for_date(current_night_str)
+            if "error" in pricing_data:
+                return {
+                    "success": False,
+                    "error": f"Could not get pricing data for {current_night_str}: {pricing_data['error']}"
+                }
+
+            night_adult_rate = float(pricing_data.get(rate_fields["adult_field"], 0))
+            night_child_rate = float(pricing_data.get(rate_fields["child_field"], 0))
+
+            if night_adult_rate == 0:
+                return {
+                    "success": False,
+                    "error": f"No adult rate found for package {package_type} on {current_night_str}"
+                }
+
+            adult_rates_sum += night_adult_rate
+            child_rates_sum += night_child_rate
+            rates_per_night.append({
+                "date": current_night_str,
+                "adult_rate": night_adult_rate,
+                "child_rate": night_child_rate
+            })
+
+        base_adult_rate = adult_rates_sum / nights
+        child_rate = child_rates_sum / nights
+
+        logger.info(
+            f"[MULTI_ROOM_CALC] {nights} nights, base_adult_rate=${base_adult_rate:.2f}, "
+            f"child_rate=${child_rate:.2f}, package={package_type}"
+        )
+
+        # Step 2: Calculate per-room totals applying surcharges independently
+        grand_total = 0.0
+        per_room_breakdown = []
+
+        for i, room in enumerate(room_bookings):
+            room_adults = room.get("adults", 0)
+            room_children_6_10 = room.get("children_6_10", 0)
+
+            room_adult_total = room_adults * base_adult_rate * nights
+            room_child_total = room_children_6_10 * child_rate * nights
+
+            # Romántico surcharge: +$20/person/night (adults only)
+            room_romantico_surcharge = 0.0
+            if package_type == "Romántico":
+                room_romantico_surcharge = 20.00 * room_adults * nights
+
+            # Single occupancy surcharge: adults==1 AND children_6_10 < 2
+            room_single_occ_surcharge = 0.0
+            if room_adults == 1 and room_children_6_10 < 2:
+                room_single_occ_surcharge = 20.00 * nights
+
+            room_total = room_adult_total + room_child_total + room_romantico_surcharge + room_single_occ_surcharge
+            grand_total += room_total
+
+            per_room_breakdown.append({
+                "room_index": i + 1,
+                "bungalow_type": room.get("bungalow_type", "Unknown"),
+                "adults": room_adults,
+                "children_6_10": room_children_6_10,
+                "adult_total": room_adult_total,
+                "child_total": room_child_total,
+                "romantico_surcharge": room_romantico_surcharge,
+                "single_occupancy_surcharge": room_single_occ_surcharge,
+                "room_total": room_total,
+            })
+
+            logger.info(
+                f"[MULTI_ROOM_CALC] Room {i+1}: adults={room_adults}, children_6_10={room_children_6_10}, "
+                f"adult_total=${room_adult_total:.2f}, child_total=${room_child_total:.2f}, "
+                f"romantico=${room_romantico_surcharge:.2f}, single_occ=${room_single_occ_surcharge:.2f}, "
+                f"room_total=${room_total:.2f}"
+            )
+
+        logger.info(f"[MULTI_ROOM_CALC] Grand total for {len(room_bookings)} rooms: ${grand_total:.2f}")
+
+        # Effective adult rate for API's adultrate field (includes Romántico +$20)
+        effective_adult_rate = base_adult_rate + 20.00 if package_type == "Romántico" else base_adult_rate
+
+        return {
+            "success": True,
+            "grand_total": grand_total,
+            "adult_rate": effective_adult_rate,
+            "child_rate": child_rate,
+            "per_room_breakdown": per_room_breakdown,
+            "rates_per_night": rates_per_night,
+        }
+
+    except Exception as e:
+        logger.error(f"[MULTI_ROOM_CALC] Error calculating multi-room total: {e}")
+        return {"success": False, "error": f"Calculation error: {str(e)}"}
 
 
 def _is_booking_available(current_time: datetime) -> bool:
@@ -2443,7 +2617,10 @@ async def _make_multi_room_api_call(
     extra_beds: int = 0,
     extra_beds_cost: float = 0.0,
     customer_instructions: str = None,
-    room_count: int = 1
+    room_count: int = 1,
+    booking_total: float = None,
+    calc_adult_rate: float = None,
+    calc_child_rate: float = None
 ) -> dict:
     """
     Make multi-room booking API call with native + delimiter format.
@@ -2512,14 +2689,18 @@ async def _make_multi_room_api_call(
     
     commenthotel = " | ".join(comment_parts)
     
-    # Calculate rates (simplified for multi-room)
+    # Calculate rates — use DB-calculated values when available, fall back to back-calculation
     total_adults = sum(int(x) for x in adultcount.split("+"))
     nights = (datetime.strptime(check_out_date, "%Y-%m-%d") - 
               datetime.strptime(check_in_date, "%Y-%m-%d")).days
     nights = max(nights, 1)
     
-    adult_rate = payment_amount / (total_adults * nights) if total_adults > 0 else 0
-    child_rate = adult_rate * 0.5
+    if calc_adult_rate is not None and calc_child_rate is not None:
+        adult_rate = calc_adult_rate
+        child_rate = calc_child_rate
+    else:
+        adult_rate = payment_amount / (total_adults * nights) if total_adults > 0 else 0
+        child_rate = adult_rate * 0.5
     
     # Build accommodation description (handle mixed types)
     if bungalow_type in accommodation_map:
@@ -2551,7 +2732,7 @@ async def _make_multi_room_api_call(
         "adultrate": f"{adult_rate:.2f}",
         "childrate": f"{child_rate:.2f}",
         "cardusername": payment_maker_name,
-        "reseramount": f"{payment_amount:.2f}",
+        "reseramount": f"{(booking_total if booking_total is not None else payment_amount):.2f}",
         "cardnumer": "0",
         "duedate": "0",
         "comment": commenthotel,

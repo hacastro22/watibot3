@@ -118,25 +118,32 @@ def chunk_modules(data: Dict[str, Any] = None, instructions_path: str = None) ->
 # in addition to the procedural English content.
 _QUERY_AUGMENTATION = {
     # ── Pricing & Quotes ──
-    "pricing_logic": "cuánto cuesta precio tarifa cotización hospedaje pasadía noche adultos niños romántico luna de miel cuánto sale por persona valentín febrero",
-    "quote_generation_protocol": "cotización precio total cuánto cuesta cuánto sale por noche quiero cotizar me puede dar el precio necesito saber el costo pasadía hospedaje bungalow 5x4 promoción",
-    "payment_methods": "cómo pago formas de pago transferencia sinpe tarjeta crédito enlace de pago comprobante depósito banco",
+    "pricing_logic": "cuánto cuesta precio tarifa cotización hospedaje pasadía noche adultos niños romántico luna de miel cuánto sale por persona valentín febrero tarifa por noche regla de precio cobro 2 adultos no socio 3 personas fecha entrada salida precio por adulto cuánto cobran",
+    "quote_generation_protocol": "cotización precio total cuánto cuesta cuánto sale por noche quiero cotizar me puede dar el precio necesito saber el costo pasadía hospedaje bungalow 5x4 promoción reservar hospedaje cuánto saldría total a pagar precio por noche adultos niños calcular 2 personas 4 personas sábado domingo febrero me puede cotizar cuánto me sale la noche para adultos quiero saber el precio de hospedaje cuánto cuesta quedarse cuánto cobran por persona",
+    "payment_methods_overview": "cómo pago formas de pago transferencia tarjeta crédito cuenta banco depósito datos de cuenta número de cuenta",
+    "credit_card_payment_protocol": "pagar con tarjeta enlace de pago compraclick link pago tarjeta crédito débito comprobante recibo",
     "daypass_sales_protocol": "pasadía day pass cuánto cuesta el pasadía entrada por el día piscina almuerzo incluido precio pasadía adultos niños",
-    "multi_room_booking_protocol": "varias habitaciones necesito dos bungalows grupo grande cuántas habitaciones reservar múltiples cuartos",
+    "multi_room_booking_rules": "varias habitaciones dos bungalows múltiples cuartos necesito 2 habitaciones 3 habitaciones distribución personas separar grupo dos cuartos reservar varias capacidad máxima",
+    "multi_room_booking_workflow": "reservar varias habitaciones proceso multi room pasos booking formato room_bookings make_multi_room_booking pago único transacción atómica",
+    "multi_room_booking_examples": "ejemplo multi habitación escenario distribución varias habitaciones dos bungalows conversación múltiples cuartos",
     "payment_objection_handling_protocol": "no quiero pagar tanto muy caro descuento rebaja más barato 50 porciento mitad",
-    "no_example_pricing_protocol": "cómo funciona el precio explicar tarifa sin fecha todavía no tengo fecha",
+    "no_example_pricing_protocol": "explicar promoción sin fecha sin dar ejemplo de precio concepto abstracto no tengo fecha todavía cómo funciona la promo sin dar número",
     # ── Packages & Content ──
-    "package_inquiry": "qué incluye incluye almuerzo desayuno piscina qué trae el paquete qué viene incluido actividades romántico luna de miel decoración valentín",
+    "package_details": "qué incluye paquete las hojas romántico escapadita pasadía contenido incluye almuerzo desayuno cena bebidas piscina valentín decoración",
+    "package_presentation_rules": "grupo mixto niños adultos diferentes paquetes presentar comida mencionar omisión alimentos watchdog",
     "sales_rules": "reglas de venta cómo presentar paquetes incluir inclusiones mencionar",
     "escapadita_secret": "más barato más económico menor precio opción económica escapadita",
     # ── Members ──
     "member_handling": "soy socio miembro membresía club número de socio SOC reserva de socio",
     "membership_sales_protocol": "quiero ser socio unirme al club membresía nueva inscripción",
     # ── Availability & Rooms ──
-    "date_validation": "fecha disponible puedo ir el sábado fin de semana disponibilidad para",
-    "occupancy_rules": "capacidad cuántas personas caben máximo personas por bungalow habitación familiar junior",
-    "accommodation_selection": "tipos de habitación bungalow familiar junior matrimonial habitación doble cuál me recomienda diferencia entre camas",
+    "date_validation": "fecha disponible puedo ir el sábado fin de semana disponibilidad para hay espacio hay cupo disponibilidad hospedarse febrero hay habitación tienen cupo 2 adultos febrero 14 al 15 entrada salida no socio validar fecha verificar fecha",
+    "occupancy_rules": "capacidad cuántas personas caben máximo personas bungalow habitación familiar junior ocupación mínimo máximo grupo grande cuántos adultos niños por habitación",
+    "accommodation_selection": "tipos de habitación bungalow familiar junior matrimonial habitación doble cuál me recomienda diferencia entre camas fotos del bungalow qué habitaciones tienen cuántos cuartos disponibles tipos de cuarto hay disponibilidad hospedarse cupo habitación",
     "booking_temporal": "cuándo puedo reservar anticipación límite reserva",
+    "tool_selection": "verificar disponibilidad check availability adultos fecha hospedaje reservar noche febrero marzo abril cuántas personas hay espacio cupo habitación bungalow disponible 2 adultos 3 adultos grupo fecha entrada salida cotizar precio hospedaje antes de cotizar cuánto cuesta la noche para adultos",
+    "pre_quote_check": "cotizar hospedaje adultos fecha noche disponibilidad antes de cotizar verificar cupo reservar habitación bungalow precio hospedaje febrero 2 adultos 4 personas cuánto cuesta quedarse",
+    "booking_time_availability_protocol": "reservar hospedaje disponibilidad habitación bungalow adultos niños fecha noche cuánto cuesta quedarse quiero reservar para el sábado",
     # ── Service Flows ──
     "cancellation_inquiry_protocol": "cancelar mi reserva quiero cancelar anular reservación política de cancelación reembolso",
     "cancellation_no_show": "no llegué no show penalización 72 horas cancelación tardía",
@@ -147,10 +154,14 @@ _QUERY_AUGMENTATION = {
     "custom_decoration_request_protocol": "decoración especial personalizada arreglo flores globos cumpleaños aniversario",
     "check_in_out_query": "check-in check-out hora entrada salida a qué hora llego a qué hora entrego",
     # ── Hotel Info ──
-    "hotel_information": "dirección ubicación cómo llego teléfono contacto horarios check-in check-out wifi internet restaurante menú comida",
+    "hotel_location_access": "dirección ubicación cómo llego dónde queda mapa acceso discapacidad silla de ruedas teléfono contacto",
+    "hotel_checkin_policies": "check-in check-out hora entrada salida cancelación política reserva requisitos regulaciones toallas",
+    "hotel_restaurant_menu": "restaurante menú comida almuerzo cena desayuno platos opciones buffet servicio habitación mesa romántica",
+    "hotel_rooms_facilities": "piscina wifi internet hamaca bar cama extra pérgola entretenimiento horario piscina dress code alberca",
     "parking": "estacionamiento parqueo dónde estaciono costo parking hay parqueo",
     "transportation": "cómo llego transporte bus ruta indicaciones dirección mapa",
-    "promotion_rules": "promoción descuento oferta 5x4 promo especial temporada qué promociones tienen este mes",
+    "pasadia_5x4_promotion": "5x4 promoción cinco por cuatro pasadía grupo 5 adultos gratis descuento grupo grande fórmula",
+    "promotion_inquiry_protocol": "qué promociones tienen descuento oferta especial corporativo institucional empresa temporada",
     "child_pricing": "niños precio niño tarifa infantil edad gratis bebé menor",
     "children_packages": "paquete infantil menú niños comida niños incluye para niños",
     "day_use_room": "habitación por el día pasadía con habitación cuarto por horas day use",
@@ -159,11 +170,20 @@ _QUERY_AUGMENTATION = {
     "all_inclusive_inquiry_protocol": "todo incluido all inclusive ilimitado sin límite",
     # Holiday chunks: ONLY match explicit holiday/Christmas/NYE queries, NOT generic
     # "temporada" or "promoción" queries which should match promotion_rules instead
-    "holiday_activities_protocol": "navidad año nuevo diciembre enero programación eventos fiesta fin de año christmas new year 24 25 31 diciembre",
+    "holiday_activities_rules": "actividades navidad año nuevo diciembre eventos programación qué hay en navidad",
+    "holiday_resort_schedule": "horario agenda programación actividades día por día schedule resort diciembre enero",
     "new_year_party_inquiry_protocol": "fiesta fin de año año nuevo 31 diciembre celebración noche vieja party new year",
     "special_date_notification_protocol": "31 diciembre año nuevo evento especial fin de año noche vieja",
     # ── Invitational / Events ──
-    "invitational_event": "invitación almuerzo gratis certificado estadía cena cortesía me invitaron",
+    "invitational_event": "invitación certificado cortesía me invitaron cena gratis regalo estadía gratuita",
+    # ── NARROW augmentation for noisy chunks (restrict false matches) ──
+    "example_responses": "ejemplo respuesta formato plantilla cómo responder modelo de respuesta",
+    "same_day_booking_protocol": "hoy mismo para hoy reservar hoy llegar hoy day pass hoy pasadía hoy",
+    "reservation_vs_walk_in_policy": "llegar sin reserva pagar allá pagar en recepción walk in sin reservar llegar directo",
+    "booking_urgency_protocol": "asegurar precio reservar rápido urgente no perder disponibilidad",
+    # ── Augmentation for never-retrieved critical chunks ──
+    "proactive_quoting_mandate": "cotizar inmediatamente dar precio rápido ofrecer precio sin que pida quiero saber cuánto cuesta directo",
+    "promotion_validation_cross_check": "promoción válida verificar promoción descuento aplica oferta real verificar promo",
 }
 
 

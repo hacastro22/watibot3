@@ -916,6 +916,54 @@ async def create_compraclick_link(
                 "check_out_date": check_out_date
             }
         
+        # 🚨 OCCUPANCY GATE: Block payment if group doesn't fit the requested room type
+        if bungalow_type and adults > 0:
+            total_occupancy = adults + (children_6_10 * 0.5)
+            occupancy_limits = {
+                'familiar': (5, 8), 'bungalow familiar': (5, 8),
+                'junior': (1, 8), 'bungalow junior': (1, 8),
+                'habitación': (1, 4), 'habitacion': (1, 4), 'doble': (1, 4),
+                'matrimonial': (2, 2),
+            }
+            occ_key = bungalow_type.lower().strip()
+            occ_range = occupancy_limits.get(occ_key)
+            if occ_range:
+                min_occ, max_occ = occ_range
+                if total_occupancy < min_occ or total_occupancy > max_occ:
+                    logger.warning(
+                        f"[OCCUPANCY_GATE] BLOCKED: {bungalow_type} requires {min_occ}-{max_occ} occupancy "
+                        f"but group has {total_occupancy} (adults={adults}, children_6_10={children_6_10})"
+                    )
+                    # Find valid alternatives from what's available
+                    valid_alternatives = []
+                    capacity_rules = {'bungalow_familiar': (5, 8), 'bungalow_junior': (1, 8), 'habitacion': (1, 4)}
+                    display_names = {'bungalow_familiar': 'Bungalow Familiar', 'bungalow_junior': 'Bungalow Junior', 'habitacion': 'Habitación Doble'}
+                    for avail_type in available_types:
+                        if avail_type in capacity_rules:
+                            a_min, a_max = capacity_rules[avail_type]
+                            if a_min <= total_occupancy <= a_max:
+                                valid_alternatives.append(display_names.get(avail_type, avail_type))
+                    if valid_alternatives:
+                        alt_str = ', '.join(valid_alternatives)
+                        instruction = (
+                            f"🚨 BLOQUEADO POR OCUPACIÓN: {bungalow_type} requiere entre {min_occ} y {max_occ} personas, "
+                            f"pero el grupo es de {total_occupancy}. Alternativas disponibles: {alt_str}. "
+                            f"Ofrece estas opciones al cliente y recalcula el precio."
+                        )
+                    else:
+                        instruction = (
+                            f"🚨 BLOQUEADO POR OCUPACIÓN: {bungalow_type} requiere entre {min_occ} y {max_occ} personas, "
+                            f"pero el grupo es de {total_occupancy}. NO hay tipos de habitación disponibles para este grupo en estas fechas. "
+                            f"Ofrece buscar otras fechas con check_smart_availability o un reembolso."
+                        )
+                    return {
+                        "success": False,
+                        "link": "",
+                        "error": f"Ocupación inválida: {bungalow_type} requiere {min_occ}-{max_occ}, grupo tiene {total_occupancy}",
+                        "availability_blocked": True,
+                        "assistant_instruction": instruction
+                    }
+
         # 🚨 CRITICAL FIX: If bungalow_type specified, check that SPECIFIC type is available
         # For multi-room bookings, also verify ENOUGH rooms are available
         if bungalow_type:
@@ -963,8 +1011,8 @@ async def create_compraclick_link(
                     # Room capacity rules: {type: (min, max)}
                     capacity_rules = {
                         'bungalow_familiar': (5, 8),
-                        'bungalow_junior': (2, 8),
-                        'habitacion': (2, 4),
+                        'bungalow_junior': (1, 8),
+                        'habitacion': (1, 4),
                     }
                     type_display_names = {
                         'bungalow_familiar': 'Bungalow Familiar',

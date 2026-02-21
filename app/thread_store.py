@@ -144,6 +144,24 @@ def get_last_response_id(identifier: str) -> Optional[str]:
         row = cur.fetchone()
         return row[0] if row and row[0] else None
 
+def get_last_updated_timestamp(identifier: str) -> Optional[str]:
+    """Retrieves the last_updated timestamp for a user's conversation.
+
+    Used to detect stale conversations where the developer message
+    (base modules) should be re-sent even if the message count
+    doesn't require it.
+
+    Args:
+        identifier: The user identifier (wa_id or subscriber_id).
+
+    Returns:
+        ISO timestamp string or None if no record exists.
+    """
+    with get_conn() as conn:
+        cur = conn.execute("SELECT last_updated FROM threads WHERE wa_id = ?", (identifier,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
 def update_last_webhook_timestamp(wa_id: str):
     """Updates the last_webhook_timestamp when a webhook message arrives.
     

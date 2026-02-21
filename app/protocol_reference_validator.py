@@ -20,12 +20,20 @@ logger = logging.getLogger(__name__)
 # Known reference corrections (shorthand -> full path)
 REFERENCE_CORRECTIONS = {
     # DEPENDENCY_CHAINS shorthand references
-    "accommodations.bungalow_occupancy": "MODULE_4_INFORMATION.accommodations.occupancy_rules",
-    "accommodations.room_details": "MODULE_4_INFORMATION.accommodations.bungalow_types",
-    "accommodation_suggestion_logic": "MODULE_4_INFORMATION.accommodation_suggestion_logic",
-    "occupancy_enforcement_protocol": "MODULE_2C_AVAILABILITY.occupancy_enforcement_protocol",
-    "payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods",
+    "accommodations.bungalow_occupancy": "MODULE_4_INFORMATION.accommodations.occupancy_calc",
+    "accommodations.room_details": "MODULE_4_INFORMATION.accommodations.types",
+    "accommodation_suggestion_logic": "MODULE_4_INFORMATION.accommodations.priority",
+    "occupancy_enforcement_protocol": "MODULE_2C_AVAILABILITY.occupancy_rules",
+    # payment_methods was split into payment_methods_overview and credit_card_payment_protocol
+    "payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview",
     "payment_objection_handling_protocol": "MODULE_2B_PRICE_INQUIRY.payment_objection_handling_protocol",
+    # Chunk split mappings
+    "MODULE_2B_PRICE_INQUIRY.payment_methods": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview",
+    "MODULE_4_INFORMATION.hotel_information": "MODULE_4_INFORMATION.hotel_location_access",
+    "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_protocol": "MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_rules",
+    "MODULE_2B_PRICE_INQUIRY.multi_room_booking_protocol": "MODULE_2B_PRICE_INQUIRY.multi_room_booking_rules",
+    "MODULE_2A_PACKAGE_CONTENT.package_inquiry": "MODULE_2A_PACKAGE_CONTENT.package_details",
+    "MODULE_4_INFORMATION.promotion_rules": "MODULE_4_INFORMATION.promotion_inquiry_protocol",
 }
 
 

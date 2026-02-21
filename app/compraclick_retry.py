@@ -147,8 +147,8 @@ async def start_compraclick_retry_process(phone_number: str, payment_data: Dict[
                     
                     capacity_rules = {
                         'bungalow_familiar': (5, 8),
-                        'bungalow_junior': (2, 8),
-                        'habitacion': (2, 4),
+                        'bungalow_junior': (1, 8),
+                        'habitacion': (1, 4),
                     }
                     type_display_names = {
                         'bungalow_familiar': 'Bungalow Familiar',
@@ -377,7 +377,8 @@ async def _attempt_sync_and_validation(phone_number: str, payment_data: Dict[str
             payment_method="CompraClick",
             payment_amount=validation_result["data"]["remaining_amount"],
             payment_maker_name=booking_data["customer_name"],
-            transfer_id=authorization_number,
+            wa_id=phone_number,
+            authorization_number=authorization_number,
             force_process=True,  # BYPASS time validation in retry mechanism
             extra_beds=booking_data.get("extra_beds", 0),
             extra_beds_cost=booking_data.get("extra_beds_cost", 0.0),

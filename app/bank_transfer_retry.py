@@ -165,8 +165,8 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
                     
                     capacity_rules = {
                         'bungalow_familiar': (5, 8),
-                        'bungalow_junior': (2, 8),
-                        'habitacion': (2, 4),
+                        'bungalow_junior': (1, 8),
+                        'habitacion': (1, 4),
                     }
                     type_display_names = {
                         'bungalow_familiar': 'Bungalow Familiar',

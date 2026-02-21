@@ -4,10 +4,12 @@ trigger: always_on
 
 <coding_guidelines>
 - My project's written in python
+- This project has its on venv
 - Use early returns when possible
 - Always add documentation when creating new functions and classes
 - ALWAYS REREAD and REANALYZE a file ENTIRELY BEFORE and AFTER EDITING to make sure everything went fine
 - When a syntax or identation error occurs REREAD AND REAANALYZE THE ENTIRE FILE BEFORE EDITING AGAIN. The SIMPLEST correction (less lines of code) for syntax and identation is ALWAYS THE BEST.
+- Never use python scripts to make changes or additions, unless DIRECTLY instructed or given permission by the user. Use the text change tool so the user always knows and keeps track of what changes have been made.
 </coding_guidelines>
 
 
