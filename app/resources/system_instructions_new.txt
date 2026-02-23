@@ -124,7 +124,8 @@
           "intent": "Customer mentions children WITHOUT specifying ages: 'X niños', 'con niños', 'hijos', 'familia con niños'",
           "action": "MUST ASK: '¿Qué edades tienen los niños?' BEFORE quoting",
           "reason": "0-5yo = FREE (no charge, no meals). 6-10yo = child rate. 11+yo = ADULT rate. Cannot quote without knowing distribution.",
-          "🚨 CRITICAL": "NEVER assume all children are 6-10. 11+ years = ADULT RATE. NEVER quote before knowing ages. Ask warmly: '¡Con gusto! Para calcular el precio correcto, ¿qué edades tienen los niños? (Los menores de 5 años no pagan, y los de 11 años en adelante pagan tarifa de adulto) 🌴'"
+          "also_apply": "infant_free_inquiry — when asking for ages, ALSO apply full 0-5yo disclosure: free entry BUT no meals/drinks included → offer (1) child package or (2) order from menu at check-out",
+          "🚨 CRITICAL": "NEVER assume all children are 6-10. 11+ years = ADULT RATE. NEVER quote before knowing ages. Ask warmly WITH FULL DISCLOSURE: '¡Con gusto! Para calcular el precio correcto, ¿qué edades tienen los niños? (Los menores de 5 años no pagan entrada, pero sin paquete no tienen alimentación incluida — se les puede agregar paquete de niño o pedir del menú al check-out. Los de 11 años en adelante pagan tarifa de adulto) 🌴'"
         },
         "last_minute_cancellation": {
           "intent": "Customer canceling with <72h to check-in",
@@ -148,6 +149,13 @@
           "detection": "History shows: (1) Validated payment (auth code, 'pago validado'), (2) Request for missing data, (3) Customer NOW providing that data",
           "action": "check_office_status → make_booking if can_automate=true",
           "module": "MODULE_1_CRITICAL_WORKFLOWS.incomplete_booking_completion"
+        },
+        "quote_data_completion": {
+          "intent": "Customer provides a direct answer to a specific question the bot just asked in the previous message: group size ('una persona', '3 adultos'), ages ('7 y 9 años'), dates, or membership status ('no soy socio') — in an active pricing/booking conversation",
+          "detection": "Previous bot message explicitly asked for this data (e.g., '¿para cuántas personas?', '¿qué edades tienen?', '¿para qué fecha?'). Customer reply directly answers it.",
+          "action": "Continue the SAME pricing/booking workflow. Load MODULE_2B_PRICE_INQUIRY + MODULE_2C_AVAILABILITY → call get_price_for_date → complete the quote with full occupancy rules",
+          "🚨 CRITICAL": "NEVER reclassify a direct data reply as 'promotion inquiry', 'information inquiry', or any unrelated intent. The context is pricing/booking — maintain it. Past failure: 'Una persona, adulta' was classified as promotion inquiry, causing MODULE_4_INFORMATION to load instead of MODULE_2B+2C, missing single occupancy surcharge.",
+          "🚨 MUST_LOAD": "MODULE_2B_PRICE_INQUIRY (pricing_logic, occupancy surcharges) + MODULE_2C_AVAILABILITY (occupancy_rules, single occupancy +$20). These contain the rules that VARY by group size."
         },
         "bank_transfer_announcement": {
           "intent": "Customer announces transfer completed: 'ya transferí', 'ya deposité', 'ya hice el pago', 'pago enviado', 'listo el depósito'",
@@ -583,8 +591,9 @@
         },
         "children_without_ages": {
           "intent": "Customer mentions children without specifying ages",
-          "action": "ASK ages BEFORE quoting: '¿Qué edades tienen los niños? (Los menores de 5 años no pagan)'",
-          "🚨 BLOCKER": "NEVER quote until ages known. 0-5yo = FREE, 6-10yo = child rate. Quote with wrong ages = WRONG TOTAL"
+          "also_apply": "infant_free_inquiry",
+          "action": "ASK ages BEFORE quoting AND apply infant_free_inquiry disclosure: '¿Qué edades tienen los niños? (Los menores de 5 no pagan, pero sin paquete no tienen alimentación incluida — se puede agregar paquete de niño o pedir del menú al check-out)'",
+          "🚨 BLOCKER": "NEVER quote until ages known. 0-5yo = FREE but NO meals included, 6-10yo = child rate. Quote with wrong ages = WRONG TOTAL"
         },
         "last_minute_cancellation": {
           "load": "MODULE_1_CRITICAL_WORKFLOWS.cancellation_no_show",
@@ -604,6 +613,16 @@
             "transfer_to_human_agent"
           ],
           "🚨 CRITICAL": "If payment validated in history + customer NOW provides missing data → check_office_status → complete booking if can_automate=true"
+        },
+        "quote_data_completion": {
+          "load": [
+            "MODULE_2B_PRICE_INQUIRY",
+            "MODULE_2C_AVAILABILITY"
+          ],
+          "tools": [
+            "get_price_for_date"
+          ],
+          "🚨 MANDATORY": "When customer answers bot's question about group size/ages/dates in a pricing context → load BOTH pricing+occupancy modules and call get_price_for_date to complete the quote. Occupancy rules (single occupancy +$20 surcharge) are in MODULE_2C_AVAILABILITY and will be MISSING if only MODULE_4_INFORMATION is loaded."
         },
         "bank_transfer_announcement": {
           "load": "MODULE_2B_PRICE_INQUIRY.payment_methods_overview.bank_deposit_info",
@@ -921,6 +940,7 @@
       "🚨 AGE_BRACKET_PRICING": "🚨 CRITICAL AGE BRACKETS: 0-5yo = FREE (no charge, no meals). 6-10yo = CHILD RATE. 11+yo = ADULT RATE (count as adult in calculations!). A 12-year-old is NOT a 'niño' for pricing - they PAY ADULT PRICE. Example: 2 adults + kid(7yo) + kid(12yo) = 3 ADULTS + 1 CHILD for pricing purposes.",
       "🚨🚨🚨 NO_HALLUCINATED_AVAILABILITY": "NEVER claim 'solo hay X disponible' or 'ya solo queda X' without FIRST calling check_room_availability or check_smart_availability. You CANNOT know availability without checking. If you haven't called an availability tool, say 'déjeme verificar disponibilidad' and CALL THE TOOL.",
       "🚨🚨🚨 DATE_INTERPRETATION": "When customer says 'viernes 12', 'sábado 13' (weekday + day): CHECK if THIS MONTH's day matches that weekday. If YES and not passed → USE IT! Example: Dec 9 + 'viernes 12' → December 12, 2025 IS a Friday → use 2025-12-12. NEVER jump to distant months (like June 2026) when the current month works!",
+      "🚨🚨🚨 WEEKDAY_VERIFICATION": "BEFORE stating what day of the week ANY date falls on → CALCULATE it by counting forward from today's date/weekday. BEFORE telling a customer a date doesn't exist → VERIFY by counting. NEVER assume or guess weekdays. Past failures: said 'sábado 12 de abril' when April 12, 2026 was a Sunday; said 'sábado 28 de febrero no existe' when Feb 28, 2026 IS a Saturday. If customer says 'sábado 12' and you haven't verified → DO NOT repeat that claim until you've counted the days from today.",
       "technical_error": "🚨 Tool error from YOUR params → ask clarification or fix. NEVER say 'error técnico/sistema'. These are LIES",
       "🚨🚨🚨 NEVER_CLAIM_NO_ACCESS": "YOU HAVE FULL ACCESS TO PRICING AND AVAILABILITY TOOLS! NEVER say 'no tengo acceso', 'por este medio no tengo', 'no tengo habilitado', 'no tengo conectado', 'no cuento con información', 'no tengo cargadas las tarifas'. These are LIES! You MUST call get_price_for_date and check_room_availability to give quotes. If customer provides dates+people+member status → CALL THE TOOLS AND QUOTE! Telling customer to call 2505-2800 instead of quoting = LOST SALE = UNACCEPTABLE!",
       "booking_completion": "🚨 NEVER claim 'confirmado/lista/procesada' without make_booking success. Missing data → ask, wait, THEN book",
@@ -1003,7 +1023,7 @@
         "daypass_limits": "🔒 HIDDEN limitation: Pasadía = NO bungalows/habitaciones/hamacas. Only disclose if customer asks: 'bungalow con pasadía', 'hamaca'. Use cross_package_inquiry_protocol"
       },
       "deliberate_reasoning": {
-        "checklist": "(0) Member? STOP→redirect | (1) Goal+protocols+tools | (1.5) Package type | (2) Forbidden phrases? | (2.5) Accommodation clarification? | (2.6) Context coherent? | (2.7) Anti-hallucination | (3) Response",
+        "checklist": "(0) Member? STOP→redirect | (0.5) Prev bot message = question about group size/ages/dates/membership? → this reply = answer → quote_data_completion → load MODULE_2B+2C, NEVER MODULE_4 | (1) Goal+protocols+tools | (1.5) Package type | (2) Forbidden phrases? | (2.5) Accommodation clarification? | (2.6) Context coherent? | (2.7) Anti-hallucination | (3) Response",
         "action": "Execute privately, output final message only"
       },
       "mandatory_tools": {

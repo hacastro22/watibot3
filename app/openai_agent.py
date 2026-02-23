@@ -228,6 +228,55 @@ def _get_occupancy_rules() -> str:
     return _OCCUPANCY_RULES_CACHE
 
 
+_PRICING_RULES_CACHE: str = ""
+
+def _get_pricing_rules() -> str:
+    """Return critical pricing calculation rules from MODULE_2B_PRICE_INQUIRY.
+
+    Pulls from three sources and merges into a single block:
+    1. MODULE_2B_PRICE_INQUIRY.pricing_logic.rules.single_occupancy
+    2. MODULE_2B_PRICE_INQUIRY.pricing_logic.final_price_formula
+    3. MODULE_2B_PRICE_INQUIRY.pricing_logic.no_additional_charges
+    4. MODULE_2B_PRICE_INQUIRY.promotion_validation_cross_check (5x4 threshold)
+
+    Appended to get_price_for_date responses so the model always has the
+    correct calculation rules (surcharges, formulas, promo thresholds) when
+    computing totals, regardless of which modules were dynamically loaded.
+    """
+    global _PRICING_RULES_CACHE
+    if _PRICING_RULES_CACHE:
+        return _PRICING_RULES_CACHE
+    try:
+        path = os.path.join(os.path.dirname(__file__), "resources", "system_instructions_new.txt")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+        pricing = data["MODULE_2B_PRICE_INQUIRY"]["pricing_logic"]
+        promo  = data["MODULE_2B_PRICE_INQUIRY"]["promotion_validation_cross_check"]
+
+        single_occ  = pricing["rules"].get("single_occupancy", "")
+        no_charges  = pricing.get("no_additional_charges", "")
+        formula     = pricing.get("final_price_formula", {})
+        promo_check = promo.get("🚨 CRITICAL_RULE", "")
+        promo_check_before = promo.get("check_before_quote", "")
+
+        parts = []
+        if single_occ:
+            parts.append(f"🚨 SINGLE_OCCUPANCY_SURCHARGE: {single_occ}")
+        if formula:
+            parts.append(f"🚨 FINAL_PRICE_FORMULA: {json.dumps(formula, ensure_ascii=False)}")
+        if no_charges:
+            parts.append(f"🚨 NO_EXTRA_CHARGES: {no_charges}")
+        if promo_check:
+            parts.append(f"🚨 5X4_PROMO_THRESHOLD: {promo_check}")
+        if promo_check_before:
+            parts.append(f"🚨 5X4_CHECK: {promo_check_before}")
+        _PRICING_RULES_CACHE = "\n".join(parts)
+    except Exception as e:
+        logger.error(f"[PRICING_RULES] Failed to load: {e}")
+        _PRICING_RULES_CACHE = '{"error": "pricing_rules unavailable"}'
+    return _PRICING_RULES_CACHE
+
+
 # Add system instruction loading function
 def load_system_instructions():
     """Load system instructions from file."""
@@ -306,6 +355,21 @@ You have been loaded with the base system configuration above. Now you must:
 8. BLOCKED: You CANNOT respond until required modules are loaded for THIS SPECIFIC QUERY
 
 RULE: Don't assume previous loads are sufficient. Each query = fresh module evaluation + loading.
+
+🚨🚨🚨 CONVERSATION CONTEXT RULE — READ BEFORE CLASSIFYING INTENT 🚨🚨🚨
+BEFORE classifying the current message, check the PREVIOUS bot message in history.
+If the previous bot message explicitly ASKED the customer for a specific piece of information
+(group size, number of adults/children, ages, dates, membership status),
+then the current message IS THE ANSWER to that question.
+→ NEVER reclassify a direct reply as an unrelated topic (e.g., "promotion inquiry").
+→ MAINTAIN the current workflow context and load the modules required to CONTINUE it.
+
+WRONG: bot asked "¿para cuántas personas?" → customer says "Una persona, adulta"
+       → bot classifies as "promotion inquiry" → loads MODULE_4_INFORMATION → MISSING surcharge rules
+
+CORRECT: bot asked "¿para cuántas personas?" → customer says "Una persona, adulta"
+         → bot recognizes this as quote_data_completion (group size answer in pricing context)
+         → loads MODULE_2B_PRICE_INQUIRY + MODULE_2C_AVAILABILITY → calls get_price_for_date → complete quote WITH occupancy rules
 
 EXAMPLE: If user requests "cotización" you MUST:
 1. FIRST: load_additional_modules(["MODULE_2C_AVAILABILITY", "MODULE_2B_PRICE_INQUIRY"], "Need availability check then pricing for quote")
@@ -1196,7 +1260,7 @@ async def add_message_to_thread(thread_id: str, content: str):
         
         if previous_response_id:
             response = await openai_client.responses.create(
-                model="gpt-5.1",
+                model="gpt-5.2",
                 previous_response_id=previous_response_id,
                 input=[
                     {
@@ -1210,7 +1274,7 @@ async def add_message_to_thread(thread_id: str, content: str):
             save_response_id(user_identifier, response.id)
         else:
             response = await openai_client.responses.create(
-                model="gpt-5.1",
+                model="gpt-5.2",
                 conversation=thread_id,
                 input=[
                     {
@@ -1798,13 +1862,13 @@ async def get_openai_response(
     # system role (highest priority): behavioral rules + RAG chunks (if RAG)
     #   → Sent on EVERY API call for maximum adherence
     # developer role: base modules (DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG)
-    #   → Sent on msg 1, then every 3rd (3, 6, 9...) + on rotation/recovery
-    #   → Also sent if conversation is stale (>15 min since last response)
+    #   → Sent on msg 1, then every 5th (5, 10, 15...) + on rotation/recovery
+    #   → Also sent if conversation is stale (>30 min since last response)
     #   → Persists via previous_response_id between refreshes
     # ================================================================
-    should_send_developer = (current_message_count == 1 or current_message_count % 3 == 0)
+    should_send_developer = (current_message_count == 1 or current_message_count % 5 == 0)
     
-    # Staleness check: re-send developer if >15 min since last assistant response
+    # Staleness check: re-send developer if >30 min since last assistant response
     # This covers pre-existing conversations and long gaps where context may drift
     if not should_send_developer:
         from .thread_store import get_last_updated_timestamp
@@ -1812,7 +1876,7 @@ async def get_openai_response(
         if last_updated_str:
             try:
                 last_updated = datetime.fromisoformat(last_updated_str)
-                if datetime.utcnow() - last_updated > timedelta(minutes=15):
+                if datetime.utcnow() - last_updated > timedelta(minutes=30):
                     should_send_developer = True
                     logger.info(f"[MSG_STRATEGY] Stale conversation detected ({last_updated_str}), forcing developer refresh")
             except (ValueError, TypeError):
@@ -1834,7 +1898,7 @@ async def get_openai_response(
     
     # Build behavioral rules (becomes system message — sent every turn)
     contextualized_message = (
-        # GPT-5.1 SOLUTION PERSISTENCE - Official OpenAI pattern for agentic completion
+        # GPT-5.2 SOLUTION PERSISTENCE - Official OpenAI pattern for agentic completion
         "<solution_persistence>\n"
         "You are an autonomous sales agent. Once the customer gives direction, proactively gather context, quote, and complete booking without waiting for additional prompts at each step.\n"
         "Persist until the customer's query is fully handled end-to-end within the current turn.\n"
@@ -1843,7 +1907,7 @@ async def get_openai_response(
         "Remember, you are an agent - keep going until the customer's query is completely resolved, before ending your turn.\n"
         "</solution_persistence>\n\n"
         
-        # GPT-5.1 PLANNING BEFORE TOOL CALLS - Required for none reasoning mode
+        # GPT-5.2 PLANNING BEFORE TOOL CALLS - Required for none reasoning mode
         "<tool_planning>\n"
         "Before each tool call, briefly verify you have correct arguments.\n"
         "After each tool call, reflect on the outcome and determine the next action.\n"
@@ -1855,7 +1919,7 @@ async def get_openai_response(
            if config.RAG_ENABLED else
            "Load modules via load_additional_modules based on decision_tree and module_dependencies in CORE_CONFIG.\n\n")
         +
-        # GPT-5.1 TOOL USAGE RULES - With examples as recommended by OpenAI
+        # GPT-5.2 TOOL USAGE RULES - With examples as recommended by OpenAI
         "<tool_usage_rules>\n"
         "When customer provides date + people + member status → call get_price_for_date and give price IN THIS TURN.\n"
         "When customer confirms payment → call generate_compraclick_payment_link IMMEDIATELY.\n"
@@ -1864,7 +1928,7 @@ async def get_openai_response(
         "When completing booking → MUST call make_booking BEFORE saying reservation is confirmed.\n"
         "</tool_usage_rules>\n\n"
         
-        # GPT-5.1 TOOL EXAMPLES - OpenAI recommends concrete examples
+        # GPT-5.2 TOOL EXAMPLES - OpenAI recommends concrete examples
         "<tool_examples>\n"
         "**Quote Example:**\n"
         "User: '3 adultos, 31 de diciembre, no socio'\n"
@@ -1880,7 +1944,7 @@ async def get_openai_response(
         "Assistant: 'Pago validado. Su reserva #XXXXX está confirmada.'\n"
         "</tool_examples>\n\n"
         
-        # GPT-5.1 WORKFLOW CHAINS - Prevent premature termination
+        # GPT-5.2 WORKFLOW CHAINS - Prevent premature termination
         "<workflow_chains>\n"
         "PAYMENT WORKFLOW: Payment tools work 24/7. check_office_status affects ONLY make_booking step.\n"
         "• can_automate=false means 'human completes booking', NOT 'human processes payment'.\n"
@@ -1889,7 +1953,7 @@ async def get_openai_response(
         "QUOTE CHAIN: get_price_for_date → present quote → ask to proceed. Complete in same response.\n"
         "</workflow_chains>\n\n"
         
-        # GPT-5.1 VERIFICATION - OpenAI recommends verify before execute
+        # GPT-5.2 VERIFICATION - OpenAI recommends verify before execute
         "<verification_rules>\n"
         "Before claiming a payment was found/not found → verify you called the validation tool.\n"
         "Before confirming a booking → verify you called make_booking and received confirmation.\n"
@@ -1898,7 +1962,7 @@ async def get_openai_response(
         "Before telling a customer a date doesn't exist → double-check by counting from today's date above.\n"
         "</verification_rules>\n\n"
         
-        # GPT-5.1 FORBIDDEN BEHAVIORS - Clear alternatives prevent deviation
+        # GPT-5.2 FORBIDDEN BEHAVIORS - Clear alternatives prevent deviation
         "<forbidden_with_alternatives>\n"
         "❌ 'Un ejecutivo le ayudará con el pago' → ✅ Call payment tool yourself NOW.\n"
         "❌ 'Le confirmarán la reserva' → ✅ Call make_booking, then confirm with actual code.\n"
@@ -1950,14 +2014,14 @@ async def get_openai_response(
         # Non-RAG path: system = behavioral rules only
         system_message = contextualized_message
 
-    # developer_message is only set when it should be sent (msg 1, 3, 6, 9...)
+    # developer_message is only set when it should be sent (msg 1, 5, 10, 15...)
     developer_message = developer_base_modules if should_send_developer else None
     
     logger.info(
         f"[MSG_STRATEGY] Message {current_message_count}: "
         f"system={'RAG' if config.RAG_ENABLED else 'behavioral'}({len(system_message):,} chars)"
         + (f", developer=base_modules({len(developer_base_modules):,} chars)" if should_send_developer 
-           else f", developer=SKIPPED (persisted, next refresh at msg {current_message_count + (3 - current_message_count % 3) % 3})")
+           else f", developer=SKIPPED (persisted, next refresh at msg {current_message_count + (5 - current_message_count % 5) % 5})")
     )
 
     # Check for PENDING bookings that need processing
@@ -2111,7 +2175,7 @@ async def get_openai_response(
                     # FIRST API CALL: Send ONLY agent context in developer input
                     # For fresh conversations, use conversation parameter for first call only
                     agent_response = await openai_client.responses.create(
-                        model="gpt-5.1",
+                        model="gpt-5.2",
                         conversation=conversation_id,
                         input=[
                             {
@@ -2144,7 +2208,7 @@ async def get_openai_response(
                 response = await _make_responses_call(
                     use_flex=True,
                     user_identifier=user_identifier,
-                    model="gpt-5.1",
+                    model="gpt-5.2",
                     previous_response_id=previous_response_id,
                     input=input_messages,
                     tools=tools,
@@ -2156,7 +2220,7 @@ async def get_openai_response(
                 response = await _make_responses_call(
                     use_flex=True,
                     user_identifier=user_identifier,
-                    model="gpt-5.1",
+                    model="gpt-5.2",
                     conversation=conversation_id,
                     input=input_messages,
                     tools=tools,
@@ -2202,7 +2266,7 @@ async def get_openai_response(
                     logger.info(f"[AGENT_CONTEXT] Creating fresh conversation with agent context (recovery)")
                     # DON'T pass conversation parameter - let OpenAI create a new one
                     agent_response = await openai_client.responses.create(
-                        model="gpt-5.1",
+                        model="gpt-5.2",
                         input=[{
                             "type": "message",
                             "role": "developer",
@@ -2222,7 +2286,7 @@ async def get_openai_response(
                     recovery_input = _build_input_messages(system_message, message, developer_base_modules)
                     
                     response = await openai_client.responses.create(
-                        model="gpt-5.1",
+                        model="gpt-5.2",
                         previous_response_id=agent_response.id,
                         input=recovery_input,
                         tools=tools,
@@ -2240,7 +2304,7 @@ async def get_openai_response(
                     # DON'T pass conversation parameter - let OpenAI create a new one
                     # Fresh start → always send developer (msg count reset to 1)
                     response = await openai_client.responses.create(
-                        model="gpt-5.1",
+                        model="gpt-5.2",
                         input=_build_input_messages(system_message, message, developer_base_modules),
                         tools=tools,
                         max_output_tokens=4000
@@ -2366,6 +2430,11 @@ async def get_openai_response(
                 if fn_name in ('check_room_availability', 'check_smart_availability', 'check_room_availability_counts'):
                     output += "\n\n🚨 OCCUPANCY RULES (MUST follow before offering ANY room type):\n" + _get_occupancy_rules()
 
+                # Inject pricing rules into get_price_for_date responses so the
+                # model always has surcharge/formula/promo rules when calculating totals.
+                if fn_name == 'get_price_for_date':
+                    output += "\n\n🚨 PRICING RULES (MUST apply when calculating totals):\n" + _get_pricing_rules()
+
                 tool_output_input.append({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -2383,7 +2452,7 @@ async def get_openai_response(
                 response = await _make_responses_call(
                     use_flex=current_tier_is_flex,
                     user_identifier=user_identifier,
-                    model="gpt-5.1",
+                    model="gpt-5.2",
                     # Use previous_response_id to continue the *same* response turn
                     previous_response_id=previous_resp_id,
                     input=tool_output_input,
@@ -2404,7 +2473,7 @@ async def get_openai_response(
                         try:
                             # Fallback without tools - use conversation for simplicity
                             response = await openai_client.responses.create(
-                                model="gpt-5.1",
+                                model="gpt-5.2",
                                 conversation=conversation_id,
                                 input=[
                                     {
@@ -2467,7 +2536,7 @@ async def get_openai_response(
                         logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh recovery conversation {conversation_id}")
                         # Fresh conversation recovery - use conversation parameter for first call
                         agent_response = await openai_client.responses.create(
-                            model="gpt-5.1",
+                            model="gpt-5.2",
                             conversation=conversation_id,
                             input=[{
                                 "type": "message",
@@ -2484,7 +2553,7 @@ async def get_openai_response(
                         # RESTART THE ENTIRE FLOW with fresh conversation
                         # Fresh start → always send developer (msg count reset to 1)
                         response = await openai_client.responses.create(
-                            model="gpt-5.1",
+                            model="gpt-5.2",
                             previous_response_id=agent_response.id,
                             input=_build_input_messages(system_message, message, developer_base_modules),
                             tools=tools,
@@ -2497,7 +2566,7 @@ async def get_openai_response(
                         
                         # Fresh start → always send developer (msg count reset to 1)
                         response = await openai_client.responses.create(
-                            model="gpt-5.1",
+                            model="gpt-5.2",
                             conversation=conversation_id,
                             input=_build_input_messages(system_message, message, developer_base_modules),
                             tools=tools,
@@ -2543,7 +2612,7 @@ async def get_openai_response(
                 logger.info(f"[MENU_PDF] {tool_name} was called BUT message contains other questions: {other_questions[:2]}... Making synthesis call.")
                 previous_resp_id = response.id
                 response = await openai_client.responses.create(
-                    model="gpt-5.1",
+                    model="gpt-5.2",
                     previous_response_id=previous_resp_id,
                     input=[
                         {
@@ -2575,7 +2644,7 @@ async def get_openai_response(
             previous_resp_id = response.id
             
             response = await openai_client.responses.create(
-                model="gpt-5.1",
+                model="gpt-5.2",
                 previous_response_id=previous_resp_id,
                 input=[
                     {
@@ -2600,7 +2669,7 @@ async def get_openai_response(
                     logger.info("[JSON_GUARD] Detected tool-like JSON, repairing")
                     # JSON repair - use conversation for simplicity since this is error recovery
                     repair_response = await openai_client.responses.create(
-                        model="gpt-5.1",
+                        model="gpt-5.2",
                         conversation=conversation_id,
                         input=[
                             {
@@ -2635,7 +2704,7 @@ async def get_openai_response(
             try:
                 # Rate limit retry - always send developer on retry (recovery path)
                 response = await openai_client.responses.create(
-                    model="gpt-5.1",
+                    model="gpt-5.2",
                     conversation=conversation_id,
                     input=_build_input_messages(system_message, message, developer_base_modules),
                     tools=tools
@@ -2682,7 +2751,7 @@ async def get_openai_response(
                         # FIRST API CALL: Send agent context only  
                         # Fresh conversation - use conversation parameter for first call
                         agent_response = await openai_client.responses.create(
-                            model="gpt-5.1",
+                            model="gpt-5.2",
                             conversation=new_conversation_id,
                             input=[
                                 {
