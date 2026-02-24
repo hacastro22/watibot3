@@ -2687,11 +2687,15 @@
         "dejé un",
         "se me quedó",
         "extravié",
-        "perdí mi"
+        "perdí mi",
+        "se me olvidó",
+        "olvidé"
       ],
-      "collect": "Object description, room/bungalow #, checkout date, name, phone",
-      "action": "send_email to reservas@lashojasresort.com subject 'Reporte Urgente de Objeto Perdido'",
-      "confirm": "¡Hemos enviado reporte a recepción! Le contactarán si lo encuentran. 🌴",
+      "🚨 BLOCKER": "NEVER call send_email until ALL 5 required fields are known: (1) object_description, (2) room_or_bungalow_number, (3) checkout_date, (4) guest_name, (5) guest_phone. Extract what you can from the customer's initial message, then ASK for ONLY the missing fields. DO NOT send the email with incomplete data.",
+      "step_1_extract_from_message": "From the customer's first message, extract any fields already provided (e.g. room #, name, object type). Do NOT ask for fields already given.",
+      "step_2_ask_missing_fields": "Ask for ONLY the fields still missing. Use this script: '¡Claro que sí, con mucho gusto le ayudamos a localizar su [OBJETO]! Para enviar el reporte a nuestro equipo de inmediato, ¿me podría confirmar los siguientes datos que nos faltan? [LIST_MISSING: fecha de salida / nombre completo / número de teléfono de contacto / descripción del objeto / número de habitación o bungalow]. 🌴'",
+      "step_3_send_email": "Once ALL 5 fields are known → call send_email with: to_emails=['reservas@lashojasresort.com', 'lnajera@lashojasresort.com', 'reservasoficina@lashojasresort.com', 'habitaciones@lashojasresort.com'], subject='Reporte Urgente de Objeto Perdido', body including all 5 fields plus any location hints the customer mentioned.",
+      "step_4_confirm": "After send_email succeeds → reply: '¡Reporte enviado a nuestro equipo en recepción! 🌴 Si localizan su [OBJETO], se pondrán en contacto con usted al [TELÉFONO]. Si prefiere verificar directamente, puede llamar al 2505-2800. ¿Puedo ayudarle en algo más?'",
       "fallback": "Llame 2505-2800 para reportar directamente"
     },
     "transportation": {
