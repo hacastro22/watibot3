@@ -1259,7 +1259,9 @@ async def add_message_to_thread(thread_id: str, content: str):
             previous_response_id = None
         
         if previous_response_id:
-            response = await openai_client.responses.create(
+            response = await _make_responses_call(
+                use_flex=True,
+                user_identifier=user_identifier,
                 model="gpt-5.2",
                 previous_response_id=previous_response_id,
                 input=[
@@ -1273,7 +1275,9 @@ async def add_message_to_thread(thread_id: str, content: str):
             )
             save_response_id(user_identifier, response.id)
         else:
-            response = await openai_client.responses.create(
+            response = await _make_responses_call(
+                use_flex=True,
+                user_identifier=user_identifier,
                 model="gpt-5.2",
                 conversation=thread_id,
                 input=[
@@ -1862,11 +1866,11 @@ async def get_openai_response(
     # system role (highest priority): behavioral rules + RAG chunks (if RAG)
     #   → Sent on EVERY API call for maximum adherence
     # developer role: base modules (DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG)
-    #   → Sent on msg 1, then every 5th (5, 10, 15...) + on rotation/recovery
+    #   → Sent on msg 1, then every 8th (8, 16, 24...) + on rotation/recovery
     #   → Also sent if conversation is stale (>30 min since last response)
     #   → Persists via previous_response_id between refreshes
     # ================================================================
-    should_send_developer = (current_message_count == 1 or current_message_count % 5 == 0)
+    should_send_developer = (current_message_count == 1 or current_message_count % 8 == 0)
     
     # Staleness check: re-send developer if >30 min since last assistant response
     # This covers pre-existing conversations and long gaps where context may drift
@@ -2014,14 +2018,14 @@ async def get_openai_response(
         # Non-RAG path: system = behavioral rules only
         system_message = contextualized_message
 
-    # developer_message is only set when it should be sent (msg 1, 5, 10, 15...)
+    # developer_message is only set when it should be sent (msg 1, 8, 16, 24...)
     developer_message = developer_base_modules if should_send_developer else None
     
     logger.info(
         f"[MSG_STRATEGY] Message {current_message_count}: "
         f"system={'RAG' if config.RAG_ENABLED else 'behavioral'}({len(system_message):,} chars)"
         + (f", developer=base_modules({len(developer_base_modules):,} chars)" if should_send_developer 
-           else f", developer=SKIPPED (persisted, next refresh at msg {current_message_count + (5 - current_message_count % 5) % 5})")
+           else f", developer=SKIPPED (persisted, next refresh at msg {current_message_count + (8 - current_message_count % 8) % 8})")
     )
 
     # Check for PENDING bookings that need processing
@@ -2174,7 +2178,9 @@ async def get_openai_response(
                     
                     # FIRST API CALL: Send ONLY agent context in developer input
                     # For fresh conversations, use conversation parameter for first call only
-                    agent_response = await openai_client.responses.create(
+                    agent_response = await _make_responses_call(
+                        use_flex=True,
+                        user_identifier=user_identifier,
                         model="gpt-5.2",
                         conversation=conversation_id,
                         input=[
@@ -2265,7 +2271,9 @@ async def get_openai_response(
                 if agent_context_system_msg:
                     logger.info(f"[AGENT_CONTEXT] Creating fresh conversation with agent context (recovery)")
                     # DON'T pass conversation parameter - let OpenAI create a new one
-                    agent_response = await openai_client.responses.create(
+                    agent_response = await _make_responses_call(
+                        use_flex=True,
+                        user_identifier=user_identifier,
                         model="gpt-5.2",
                         input=[{
                             "type": "message",
@@ -2285,7 +2293,9 @@ async def get_openai_response(
                     # Fresh start → always send developer (msg count reset to 1)
                     recovery_input = _build_input_messages(system_message, message, developer_base_modules)
                     
-                    response = await openai_client.responses.create(
+                    response = await _make_responses_call(
+                        use_flex=True,
+                        user_identifier=user_identifier,
                         model="gpt-5.2",
                         previous_response_id=agent_response.id,
                         input=recovery_input,
@@ -2303,7 +2313,9 @@ async def get_openai_response(
                     
                     # DON'T pass conversation parameter - let OpenAI create a new one
                     # Fresh start → always send developer (msg count reset to 1)
-                    response = await openai_client.responses.create(
+                    response = await _make_responses_call(
+                        use_flex=True,
+                        user_identifier=user_identifier,
                         model="gpt-5.2",
                         input=_build_input_messages(system_message, message, developer_base_modules),
                         tools=tools,
@@ -2343,18 +2355,8 @@ async def get_openai_response(
                 raw_args = getattr(tc, "arguments", None)
                 call_id = getattr(tc, "call_id", None) or getattr(tc, "id", None)
                 
-                # ================================================================
-                # FLEX TIER SWITCHING LOGIC
-                # ================================================================
-                # When RAG is enabled, load_additional_modules is removed so the
-                # first tool call will always be a real tool needing Standard tier.
-                # When RAG is disabled, load_additional_modules is safe for Flex.
-                if fn_name != "load_additional_modules":
-                    if current_tier_is_flex:
-                        logger.info(f"[TIER] Tool '{fn_name}' detected, switching to Standard tier for rest of chain")
-                        current_tier_is_flex = False
-                else:
-                    logger.info(f"[TIER] Tool '{fn_name}' is safe for Flex tier")
+                # All tool calls stay on Flex tier (with Standard fallback via _make_responses_call)
+                logger.info(f"[TIER] Tool '{fn_name}' - keeping Flex tier")
                 
                 logger.info(f"[Tool] Round {round_count} - Requested: {fn_name} with call_id: {call_id} args={raw_args}")
 
@@ -2434,6 +2436,7 @@ async def get_openai_response(
                 # model always has surcharge/formula/promo rules when calculating totals.
                 if fn_name == 'get_price_for_date':
                     output += "\n\n🚨 PRICING RULES (MUST apply when calculating totals):\n" + _get_pricing_rules()
+                    logger.info(f"[PRICING_INJECTION] Injected pricing rules into get_price_for_date response")
 
                 tool_output_input.append({
                     "type": "function_call_output",
@@ -2472,7 +2475,9 @@ async def get_openai_response(
                         # Try to get a natural response without tools
                         try:
                             # Fallback without tools - use conversation for simplicity
-                            response = await openai_client.responses.create(
+                            response = await _make_responses_call(
+                                use_flex=True,
+                                user_identifier=user_identifier,
                                 model="gpt-5.2",
                                 conversation=conversation_id,
                                 input=[
@@ -2535,7 +2540,9 @@ async def get_openai_response(
                     if agent_context_system_msg:
                         logger.info(f"[AGENT_CONTEXT] Injecting agent context for fresh recovery conversation {conversation_id}")
                         # Fresh conversation recovery - use conversation parameter for first call
-                        agent_response = await openai_client.responses.create(
+                        agent_response = await _make_responses_call(
+                            use_flex=True,
+                            user_identifier=user_identifier,
                             model="gpt-5.2",
                             conversation=conversation_id,
                             input=[{
@@ -2552,7 +2559,9 @@ async def get_openai_response(
                         
                         # RESTART THE ENTIRE FLOW with fresh conversation
                         # Fresh start → always send developer (msg count reset to 1)
-                        response = await openai_client.responses.create(
+                        response = await _make_responses_call(
+                            use_flex=True,
+                            user_identifier=user_identifier,
                             model="gpt-5.2",
                             previous_response_id=agent_response.id,
                             input=_build_input_messages(system_message, message, developer_base_modules),
@@ -2565,7 +2574,9 @@ async def get_openai_response(
                         logger.info(f"[MSG_STRATEGY] Tool error recovery without context at message {current_message_count}: sending system + developer")
                         
                         # Fresh start → always send developer (msg count reset to 1)
-                        response = await openai_client.responses.create(
+                        response = await _make_responses_call(
+                            use_flex=True,
+                            user_identifier=user_identifier,
                             model="gpt-5.2",
                             conversation=conversation_id,
                             input=_build_input_messages(system_message, message, developer_base_modules),
@@ -2611,7 +2622,9 @@ async def get_openai_response(
                 # There are other questions! Make synthesis call to answer them
                 logger.info(f"[MENU_PDF] {tool_name} was called BUT message contains other questions: {other_questions[:2]}... Making synthesis call.")
                 previous_resp_id = response.id
-                response = await openai_client.responses.create(
+                response = await _make_responses_call(
+                    use_flex=True,
+                    user_identifier=user_identifier,
                     model="gpt-5.2",
                     previous_response_id=previous_resp_id,
                     input=[
@@ -2643,7 +2656,9 @@ async def get_openai_response(
             # Use previous_response_id to continue the same turn and avoid reasoning item conflicts
             previous_resp_id = response.id
             
-            response = await openai_client.responses.create(
+            response = await _make_responses_call(
+                use_flex=True,
+                user_identifier=user_identifier,
                 model="gpt-5.2",
                 previous_response_id=previous_resp_id,
                 input=[
@@ -2668,7 +2683,9 @@ async def get_openai_response(
                 if any(k in str(parsed).lower() for k in ['function', 'arguments', 'name']):
                     logger.info("[JSON_GUARD] Detected tool-like JSON, repairing")
                     # JSON repair - use conversation for simplicity since this is error recovery
-                    repair_response = await openai_client.responses.create(
+                    repair_response = await _make_responses_call(
+                        use_flex=True,
+                        user_identifier=user_identifier,
                         model="gpt-5.2",
                         conversation=conversation_id,
                         input=[
@@ -2703,7 +2720,9 @@ async def get_openai_response(
             # Retry once for rate limit
             try:
                 # Rate limit retry - always send developer on retry (recovery path)
-                response = await openai_client.responses.create(
+                response = await _make_responses_call(
+                    use_flex=True,
+                    user_identifier=user_identifier,
                     model="gpt-5.2",
                     conversation=conversation_id,
                     input=_build_input_messages(system_message, message, developer_base_modules),
@@ -2750,7 +2769,9 @@ async def get_openai_response(
                     if agent_context_system_msg:
                         # FIRST API CALL: Send agent context only  
                         # Fresh conversation - use conversation parameter for first call
-                        agent_response = await openai_client.responses.create(
+                        agent_response = await _make_responses_call(
+                            use_flex=True,
+                            user_identifier=user_identifier,
                             model="gpt-5.2",
                             conversation=new_conversation_id,
                             input=[

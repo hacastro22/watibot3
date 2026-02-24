@@ -444,37 +444,47 @@ async def validate_compraclick_payment(authorization_number: str, booking_total:
                 }
                 return {"success": True, "data": data, "error": ""}
             else:
-                logger.warning(f"CompraClick payment '{authorization_number}' validation failed. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
-                
-                codreser = result.get('codreser', '') or 'N/A'
-                dateused = result.get('dateused', '') or 'N/A'
+                codreser = result.get('codreser', '') or ''
+                dateused = result.get('dateused', '') or ''
                 original_amount = importe
-                
+
+                # Case 1: payment was already applied to a confirmed booking
+                if codreser and codreser.strip():
+                    date_str = f" el {dateused}" if dateused else ""
+                    logger.info(f"[ALREADY_USED] CompraClick {authorization_number} already applied to booking {codreser}")
+                    return {
+                        "success": False,
+                        "error": "already_used_for_booking",
+                        "message": f"Este pago de ${original_amount:.2f} ya fue aplicado a la reserva {codreser}{date_str}. El pago fue recibido y procesado correctamente.",
+                        "booking_code": codreser,
+                        "date_used": dateused,
+                        "data": {
+                            "authorization_code": authorization_number,
+                            "previous_bookings": codreser,
+                            "date_used": dateused,
+                            "is_valid": False
+                        }
+                    }
+
+                # Case 2: genuinely insufficient balance (no booking was made with this payment)
+                logger.warning(f"CompraClick payment '{authorization_number}' validation failed. Remaining: {remaining_amount}, Required: {booking_total * 0.5}")
                 customer_message = (
                     f"Hemos encontrado su pago con autorización {authorization_number} por ${original_amount:.2f}, "
-                    f"pero este pago ya ha sido utilizado previamente. "
-                    f"\n\n📋 **Detalles del uso anterior:**\n"
-                    f"• Reserva(s): {codreser}\n"
-                    f"• Fecha de uso: {dateused}\n"
-                    f"• Saldo restante: ${remaining_amount:.2f}\n\n"
+                    f"pero el saldo disponible (${remaining_amount:.2f}) no es suficiente para cubrir su reserva de ${booking_total:.2f}. "
                     f"Si necesita realizar una nueva reserva, puedo generar un nuevo enlace de pago CompraClick. "
                     f"¿Le gustaría que proceda con esto? 💳"
                 )
-                
                 data = {
                     "authorization_code": authorization_number,
                     "remaining_amount": remaining_amount,
                     "original_amount": original_amount,
                     "booking_total": booking_total,
                     "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
-                    "is_valid": is_valid,
-                    "previous_bookings": codreser,
-                    "date_used": dateused
+                    "is_valid": is_valid
                 }
-                
                 return {
-                    "success": False, 
-                    "data": data, 
+                    "success": False,
+                    "data": data,
                     "error": "Payment already used",
                     "customer_message": customer_message
                 }
@@ -706,20 +716,34 @@ async def validate_compraclick_payment_fallback(
                     "customer_message": customer_message
                 }
             else:
-                codreser = result.get('codreser', '') or 'N/A'
-                dateused = result.get('dateused', '') or 'N/A'
-                
+                codreser = result.get('codreser', '') or ''
+                dateused = result.get('dateused', '') or ''
+
+                # Case 1: payment was already applied to a confirmed booking
+                if codreser and codreser.strip():
+                    date_str = f" el {dateused}" if dateused else ""
+                    logger.info(f"[ALREADY_USED] CompraClick fallback {autorizacion} already applied to booking {codreser}")
+                    return {
+                        "success": False,
+                        "error": "already_used_for_booking",
+                        "message": f"Este pago de ${importe:.2f} ya fue aplicado a la reserva {codreser}{date_str}. El pago fue recibido y procesado correctamente.",
+                        "booking_code": codreser,
+                        "date_used": dateused,
+                        "data": {
+                            "authorization_code": autorizacion,
+                            "previous_bookings": codreser,
+                            "date_used": dateused,
+                            "is_valid": False,
+                            "validation_method": "fallback"
+                        }
+                    }
+
+                # Case 2: genuinely insufficient balance (no booking was made with this payment)
                 customer_message = (
                     f"Encontramos su pago (Autorización: {autorizacion}) por ${importe:.2f}, "
-                    f"pero ya ha sido utilizado previamente.\n\n"
-                    f"📋 **Detalles del uso anterior:**\n"
-                    f"• Reserva(s): {codreser}\n"
-                    f"• Fecha de uso: {dateused}\n"
-                    f"• Saldo restante: ${remaining_amount:.2f}\n\n"
-                    f"El saldo restante no es suficiente para cubrir su nueva reserva. "
+                    f"pero el saldo disponible (${remaining_amount:.2f}) no es suficiente para cubrir su reserva de ${booking_total:.2f}. "
                     f"¿Le gustaría que genere un nuevo enlace de pago CompraClick? 💳"
                 )
-                
                 data = {
                     "authorization_code": autorizacion,
                     "remaining_amount": remaining_amount,
@@ -727,8 +751,6 @@ async def validate_compraclick_payment_fallback(
                     "booking_total": booking_total,
                     "coverage_percentage": (remaining_amount / booking_total) * 100 if booking_total > 0 else 0,
                     "is_valid": is_valid,
-                    "previous_bookings": codreser,
-                    "date_used": dateused,
                     "validation_method": "fallback"
                 }
                 

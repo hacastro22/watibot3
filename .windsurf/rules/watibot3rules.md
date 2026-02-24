@@ -6,6 +6,7 @@ trigger: always_on
 - My project's written in python
 - This project has its on venv
 - Use early returns when possible
+- ALWAYS check the syntax of a file after editing it
 - Always add documentation when creating new functions and classes
 - ALWAYS REREAD and REANALYZE a file ENTIRELY BEFORE and AFTER EDITING to make sure everything went fine
 - When a syntax or identation error occurs REREAD AND REAANALYZE THE ENTIRE FILE BEFORE EDITING AGAIN. The SIMPLEST correction (less lines of code) for syntax and identation is ALWAYS THE BEST.

@@ -27,6 +27,20 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Import tools from openai_agent to enable dynamic module loading and other capabilities
 from . import openai_agent
 
+
+async def _responses_flex(wa_id: str, **kwargs):
+    """Wrapper for client.responses.create that uses Flex tier with Standard fallback."""
+    async def _flex():
+        return await client.responses.create(**kwargs, service_tier="flex")
+    async def _standard():
+        return await client.responses.create(**kwargs)
+    return await call_with_flex_fallback(
+        flex_call=_flex,
+        standard_call=_standard,
+        operation_name=f"image_handler:{wa_id}"
+    )
+
+
 async def classify_image_with_context(
     image_path: str, 
     conversation_context: str,
@@ -372,7 +386,8 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                 if previous_response_id and recovery_attempts == 0:
                     # Continue existing conversation with instructions and tools
                     logger.info(f"[IMAGE_CLASSIFIER] Continuing conversation with system instructions and tools")
-                    response = await client.responses.create(
+                    response = await _responses_flex(
+                        wa_id,
                         model="gpt-5.2",
                         previous_response_id=previous_response_id,
                         instructions=instructions_text,
@@ -383,7 +398,8 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                 else:
                     # New conversation or recovery from error
                     logger.info(f"[IMAGE_CLASSIFIER] Starting {'new' if recovery_attempts == 0 else 'fresh recovery'} conversation with system instructions and tools")
-                    response = await client.responses.create(
+                    response = await _responses_flex(
+                        wa_id,
                         model="gpt-5.2",
                         conversation=conversation_id,
                         instructions=instructions_text,
@@ -395,14 +411,15 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                 
             except Exception as e:
                 error_str = str(e).lower()
-                # Check if it's a tool call related error (stale tool call IDs)
-                if ("tool output" in error_str or "function call" in error_str or "no tool output found" in error_str):
+                # Check if it's a tool call error or context window overflow (both recover via fresh conversation)
+                if ("tool output" in error_str or "function call" in error_str or "no tool output found" in error_str
+                        or "context_length_exceeded" in error_str or "context window" in error_str):
                     recovery_attempts += 1
                     if recovery_attempts > max_recovery_attempts:
                         logger.error(f"[IMAGE_CLASSIFIER] Too many recovery attempts ({recovery_attempts}), giving up")
                         raise  # Re-raise to be caught by outer exception handler
                     
-                    logger.warning(f"[IMAGE_CLASSIFIER] Tool call error (attempt {recovery_attempts}): {e}")
+                    logger.warning(f"[IMAGE_CLASSIFIER] Recoverable error (attempt {recovery_attempts}): {e}")
                     logger.info(f"[IMAGE_CLASSIFIER] Creating fresh conversation for recovery")
                     
                     # Create fresh conversation (httpx already imported at module level)
@@ -430,7 +447,8 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                     agent_context_system_msg = get_agent_context_for_system_injection(wa_id)
                     if agent_context_system_msg:
                         logger.info(f"[IMAGE_CLASSIFIER] Injecting agent context for fresh recovery conversation {conversation_id}")
-                        agent_response = await client.responses.create(
+                        agent_response = await _responses_flex(
+                            wa_id,
                             model="gpt-5.2",
                             conversation=conversation_id,
                             input=[{
@@ -503,7 +521,8 @@ async def handle_general_inquiry_image(image_path: str, wa_id: str, classificati
                 })
             
             # Send tool results back to the API to continue the conversation
-            response = await client.responses.create(
+            response = await _responses_flex(
+                wa_id,
                 model="gpt-5.2",
                 previous_response_id=response.id,
                 input=tool_results,

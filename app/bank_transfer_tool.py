@@ -772,6 +772,30 @@ def validate_bank_transfer(slip_date: str, slip_amount: float, booking_amount: f
                         "orphan_recovered": True
                     }
 
+            # Check for already-consumed transfer that has a confirmed booking code
+            if not transfer_record:
+                already_used_query = """
+                    SELECT id, credit, used, codreser, dateused FROM bac 
+                    WHERE credit = %s AND STR_TO_DATE(date, '%d/%m/%Y') = %s 
+                    AND used >= credit AND codreser IS NOT NULL AND codreser != ''
+                    LIMIT 1
+                """
+                cursor.execute(already_used_query, (slip_amount, slip_date))
+                already_used_record = cursor.fetchone()
+
+                if already_used_record:
+                    codreser = already_used_record['codreser']
+                    dateused = already_used_record.get('dateused') or ''
+                    date_str = f" el {dateused}" if dateused else ""
+                    logger.info(f"[ALREADY_USED] Transfer ${slip_amount} on {slip_date} already applied to booking {codreser}")
+                    return {
+                        "success": False,
+                        "error": "already_used_for_booking",
+                        "message": f"Esta transferencia de ${slip_amount:.2f} ya fue aplicada a la reserva {codreser}{date_str}. El pago fue recibido y procesado correctamente.",
+                        "booking_code": codreser,
+                        "date_used": dateused
+                    }
+
             if not transfer_record:
                 logger.warning(f"Validation failed: No unused transfer found for amount {slip_amount} on {slip_date}.")
                 return {"success": False, "message": f"No se encontró una transferencia bancaria disponible por {slip_amount:.2f} en la fecha {slip_date}."}
