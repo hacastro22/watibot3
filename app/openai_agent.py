@@ -184,16 +184,19 @@ _OCCUPANCY_RULES_CACHE: str = ""
 def _get_occupancy_rules() -> str:
     """Return ALL occupancy-related rules consolidated from system instructions.
 
-    Pulls from four sources and merges them into a single block:
+    Pulls from five sources and merges them into a single block:
     1. MODULE_2C_AVAILABILITY.occupancy_rules (limits, auto_filter, Dec 31,
        + moved prohibitions: room_occupancy, ROOM_OCCUPANCY_BLOCKER,
        MULTI_ROOM_COUNT_VERIFICATION)
     2. DECISION_TREE.multi_room_booking.CAPACITY_RULES (min/max + formula)
     3. INTENT_TO_MODULE_MAP.multi_room_booking.CAPACITY_VALIDATION (per-room check)
     4. INTENT_TO_MODULE_MAP.wants_to_book.OCCUPANCY_CHECK (pre-offer gate)
+    5. MODULE_2C_AVAILABILITY.occupancy_rules.auto_filter (explicitly surfaced
+       as a labeled directive so the model applies it before responding)
 
     Appended to availability tool outputs so the model always has room
-    capacity constraints when deciding which room type to offer.
+    capacity constraints when deciding which room type to offer, and never
+    blindly reports all available types from the tool result.
     """
     global _OCCUPANCY_RULES_CACHE
     if _OCCUPANCY_RULES_CACHE:
@@ -221,6 +224,9 @@ def _get_occupancy_rules() -> str:
             parts.append(f"\n⚠️ CAPACITY_VALIDATION: {capacity_validation}")
         if occupancy_check:
             parts.append(f"\n🚨 OCCUPANCY_CHECK: {occupancy_check}")
+        auto_filter = rules.get("auto_filter", "")
+        if auto_filter:
+            parts.append(f"\n🚨 AUTO_FILTER (apply IMMEDIATELY after availability tool — BEFORE responding to customer): {auto_filter}")
         _OCCUPANCY_RULES_CACHE = "\n".join(parts)
     except Exception as e:
         logger.error(f"[OCCUPANCY_RULES] Failed to load: {e}")
@@ -233,15 +239,17 @@ _PRICING_RULES_CACHE: str = ""
 def _get_pricing_rules() -> str:
     """Return critical pricing calculation rules from MODULE_2B_PRICE_INQUIRY.
 
-    Pulls from three sources and merges into a single block:
+    Pulls from five sources and merges into a single block:
     1. MODULE_2B_PRICE_INQUIRY.pricing_logic.rules.single_occupancy
     2. MODULE_2B_PRICE_INQUIRY.pricing_logic.final_price_formula
     3. MODULE_2B_PRICE_INQUIRY.pricing_logic.no_additional_charges
     4. MODULE_2B_PRICE_INQUIRY.promotion_validation_cross_check (5x4 threshold)
+    5. MODULE_4_INFORMATION.accommodations.types (room feature descriptions)
 
     Appended to get_price_for_date responses so the model always has the
     correct calculation rules (surcharges, formulas, promo thresholds) when
-    computing totals, regardless of which modules were dynamically loaded.
+    computing totals, and proactively includes room amenity highlights in
+    accommodation quotes, regardless of which modules were dynamically loaded.
     """
     global _PRICING_RULES_CACHE
     if _PRICING_RULES_CACHE:
@@ -259,6 +267,12 @@ def _get_pricing_rules() -> str:
         promo_check = promo.get("🚨 CRITICAL_RULE", "")
         promo_check_before = promo.get("check_before_quote", "")
 
+        # Room type features from MODULE_4_INFORMATION
+        room_types = data.get("MODULE_4_INFORMATION", {}).get("accommodations", {}).get("types", {})
+        junior_feat  = room_types.get("Junior", {}).get("features", "")
+        familiar_feat = room_types.get("Familiar", {}).get("features", "")
+        doble_feat   = room_types.get("Doble", {}).get("features", "")
+
         parts = []
         if single_occ:
             parts.append(f"🚨 SINGLE_OCCUPANCY_SURCHARGE: {single_occ}")
@@ -270,6 +284,15 @@ def _get_pricing_rules() -> str:
             parts.append(f"🚨 5X4_PROMO_THRESHOLD: {promo_check}")
         if promo_check_before:
             parts.append(f"🚨 5X4_CHECK: {promo_check_before}")
+        if junior_feat or familiar_feat or doble_feat:
+            room_feat_block = (
+                "🏨 ROOM_TYPE_FEATURES (accommodation quotes only — include PROACTIVELY after total):\n"
+                f"  Junior  → {junior_feat}\n"
+                f"  Familiar → {familiar_feat}\n"
+                f"  Doble   → {doble_feat}\n"
+                "  Matrimonial → cama king, terraza privada y hamacas, ideal para parejas"
+            )
+            parts.append(room_feat_block)
         _PRICING_RULES_CACHE = "\n".join(parts)
     except Exception as e:
         logger.error(f"[PRICING_RULES] Failed to load: {e}")
@@ -2152,6 +2175,36 @@ async def get_openai_response(
         else:
             logger.info(f"[OpenAI] Fresh conversation - no previous response to continue from")
         
+        # ================================================================
+        # PROACTIVE THREAD ROTATION
+        # ================================================================
+        # Cap context accumulation (O(n²) token growth) by rotating at a
+        # configured turn limit. Only triggers when an existing conversation
+        # chain is active (previous_response_id is set).
+        if (current_message_count >= config.THREAD_ROTATION_TURN_LIMIT
+                and previous_response_id is not None):
+            logger.info(
+                f"[THREAD_ROTATION] Proactive rotation at turn {current_message_count} "
+                f"(limit={config.THREAD_ROTATION_TURN_LIMIT}) for {user_identifier}"
+            )
+            new_conv_id = await rotate_conversation_thread(
+                conversation_id, user_identifier, "", ""
+            )
+            if new_conv_id:
+                conversation_id = new_conv_id
+                save_response_id(user_identifier, None)
+                previous_response_id = None
+                from .thread_store import reset_message_count
+                reset_message_count(user_identifier)
+                current_message_count = increment_message_count(user_identifier)
+                should_send_developer = True
+                logger.info(f"[THREAD_ROTATION] Proactive rotation complete → new conv: {new_conv_id}")
+            else:
+                logger.warning(
+                    f"[THREAD_ROTATION] Proactive rotation failed for {user_identifier}, "
+                    f"continuing on existing conversation"
+                )
+
         try:
             # Check if agent context needs to be injected (ONE TIME ONLY per conversation)
             from agent_context_injector import (

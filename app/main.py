@@ -333,6 +333,28 @@ async def process_image_message(wa_id: str, file_path: str, caption: str = None,
             response = await client.get(media_url, headers=headers, timeout=60)
             response.raise_for_status()
 
+            # Guard: WATI sometimes returns HTTP 200 with a JSON/text error body
+            # (e.g. {"result":false,"message":"Failed to download file"}) instead of
+            # the actual image bytes.  If we let this through, the vision model reads
+            # the error text and parrots it back to the customer.
+            content_type = response.headers.get("content-type", "")
+            is_media_content = (
+                content_type.startswith("image/")
+                or content_type.startswith("application/pdf")
+                or content_type.startswith("application/octet-stream")
+                or content_type == ""  # some WATI responses omit the header; let classifier decide
+            )
+            if not is_media_content:
+                logger.warning(
+                    f"[PROCESS_IMAGE] WATI returned non-media content-type '{content_type}' "
+                    f"for {file_path} ({wa_id}) — body: {response.text[:200]!r}"
+                )
+                return (
+                    "(El cliente envió una imagen/documento pero el archivo no pudo "
+                    "descargarse desde el servidor. Pídele amablemente que lo reenvíe "
+                    "como imagen normal o como PDF, sin la opción 'ver una vez'.)"
+                )
+
             # Use correct file extension
             with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmpfile:
                 tmpfile.write(response.content)

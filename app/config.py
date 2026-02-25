@@ -47,3 +47,8 @@ FLEX_TIMEOUT_SECONDS = int(os.getenv("FLEX_TIMEOUT_SECONDS", "120"))  # 2 minute
 # RAG Configuration
 # Enable/disable RAG-based module retrieval (default: False = use current architecture)
 RAG_ENABLED = os.getenv("RAG_ENABLED", "false").lower() == "true"
+
+# Thread Rotation Configuration
+# Proactively rotate conversation at this turn limit to cap O(n^2) token accumulation.
+# Override via env var without code deploy: THREAD_ROTATION_TURN_LIMIT=20
+THREAD_ROTATION_TURN_LIMIT = int(os.getenv("THREAD_ROTATION_TURN_LIMIT", "15"))

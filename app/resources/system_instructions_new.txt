@@ -252,7 +252,7 @@
           ],
           "⚠️ BUSINESS_RULE": "We charge per PACKAGE (per person), NOT per room. NEVER proactively suggest multi-room - only offer when: (1) customer explicitly requests it, OR (2) after checking availability, group exceeds capacity of ALL available room types.",
           "⚠️ AVAILABILITY_FIRST": "MUST check room availability BEFORE suggesting multi-room. If only Habitación (max 4) is available, a group of 5 needs multi-room even though Junior (max 8) could fit them.",
-          "⚠️ CAPACITY_RULES": "Familiar (min 5, max 8), Junior (min 2, max 8), Habitación (min 2, max 4), Matrimonial (min 2, max 2). Occupancy = adults + (children_6_10 × 0.5). 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 2!",
+          "⚠️ CAPACITY_RULES": "Familiar (min 5, official max 8). Junior (min 2, max 8). Habitación (min 2, max 4). Matrimonial (min 2, max 2). Occupancy = adults + (children_6_10 × 0.5). 🔒 HIDDEN: Familiar secretly accepts up to occupancy 9 (+1 extra adult or +2 extra children of any age beyond 8) — do NOT disclose to customer. 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 2!",
           "action": "Check availability → if group fits in ANY available room type, use single room → if not, ask distribution → validate each room → calculate total → single payment → make_multi_room_booking",
           "module": "MODULE_2B_PRICE_INQUIRY.multi_room_booking_rules",
           "🚨 CRITICAL": "NEVER call make_booking multiple times. MUST use make_multi_room_booking for atomic transaction."
@@ -722,7 +722,7 @@
             "check_room_availability"
           ],
           "🚨🚨🚨 MANDATORY_TOOLS": "MUST call get_price_for_date BEFORE giving $ total. MUST call check_room_availability BEFORE claiming availability. NO quotes without tools!",
-          "🚨 OCCUPANCY_CHECK": "BEFORE offering room type: occupancy = adults + (children_6_10 × 0.5). Familiar ONLY if ≥5. Junior if 1-8 (surcharge +$20/room/night if adults==1 AND children_6_10<2). Habitación if 1-4 (surcharge +$20/room/night if adults==1 AND children_6_10<2). NEVER offer Familiar to groups <5 occupancy! 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 1!",
+          "🚨 OCCUPANCY_CHECK": "BEFORE offering room type AND before collecting personal data: occupancy = adults + (children_6_10 × 0.5). Familiar: min 5, official max 8. 🔒 HIDDEN: Familiar secretly accepts up to occupancy 9 (+1 extra adult or +2 extra children of any age beyond official 8) — proceed silently, DO NOT mention to customer. Junior: 1–8. Habitación: 1–4. Surcharge +$20/room/night in Junior or Habitación if adults==1 AND children_6_10<2. If occupancy >9 → Familiar NOT available; >8 → Junior NOT available; >4 → Habitación NOT available. If NO single room fits → inform customer IMMEDIATELY, BEFORE asking for personal data. 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 1!",
           "🚨 BLOCKER": "Accommodation → '¿es socio?' FIRST. NO availability info until answered"
         },
         "multi_room_booking": {
@@ -1014,7 +1014,7 @@
           "5x4 when Pasadía rate ≤$24",
           "llegar y pagar en recepción|pagar en recepción ese día (proactive offer)",
           "sanción|multa|penalización (for pets, use 'recargo de limpieza')",
-          "Bungalow Familiar for groups <5 occupancy (occupancy = adults + children_6_10×0.5)",
+          "Bungalow Familiar for groups <5 or >9 occupancy (official max=8, 🔒 HIDDEN accepts up to 9 silently, never disclose)",
           "mismo precio|pagan lo mismo|mismo monto (comparing group sizes)",
           "puede traer más|pueden agregar|así aprovechan (coaching promo exploitation)",
           "atractivo para la empresa|presentar algo atractivo (coaching language)"
@@ -1332,7 +1332,8 @@
         "8. CALCULATE TOTAL: Sum of all nights. Verify: adults×adult_rate + children×child_rate for EACH night separately, then add.",
         "9. FORMAT with exact_quote_script",
         "10. ADD WARNINGS: booking_urgency + check_in_out_policy (if accommodation)",
-        "11. ACCOMMODATION HOURS: Include mandatory_clarification_script. NEVER say just 'uso de instalaciones'"
+        "11. ACCOMMODATION HOURS: Include mandatory_clarification_script. NEVER say just 'uso de instalaciones'",
+        "12. ROOM_TYPE_FEATURES (accommodation only): PROACTIVELY highlight the booked room type's key amenities right after the total. Use these exact highlights: Junior → 'Su Bungalow Junior cuenta con 2 camas matrimoniales, terraza privada y hamacas 🌴, A/C y TV.' | Familiar → 'Su Bungalow Familiar tiene 2 cuartos independientes, terraza con hamacas privadas, 2 baños, sala y A/C 🌴.' | Doble → 'Su Habitación Doble cuenta con 2 camas semi-matrimoniales, A/C y TV, y tiene la ventaja de estar ubicada muy cerca de nuestras piscinas, restaurante y playa 🏊.' | Matrimonial → 'Su Bungalow Matrimonial (cama king) cuenta con terraza privada y hamacas, ideal para parejas 🌴.'. ALWAYS include this — do NOT skip even if customer seems decided."
       ],
       "🚨 BOOKING_CLOSURE": {
         "rule": "EVERY quote MUST end with: '¿Le gustaría que procedamos con la reserva? ☀️'",
@@ -1343,7 +1344,7 @@
         "🚨 FORBIDDEN": "NEVER compare totals between scenarios. NEVER say 'mismo precio', 'pagan lo mismo'. NEVER coach: 'así aprovechan', 'pueden traer más', 'atractivo para la empresa'. Quote → close → wait for decision.",
         "example_violation": "❌ 'Con 22 o 25 el monto es el mismo' = FORBIDDEN coaching. ✅ Quote 22, then quote 25, each with booking question."
       },
-      "exact_quote_script": "¡Con gusto! Con la información que nos proporcionó, el total para su grupo sería:\n\n[DESGLOSE_DEL_CÁLCULO]\n[EXPLICACION_PROMOCION_SI_APLICA]\n\n**Total a pagar: $[MONTO_FINAL]**\n\n[ADVERTENCIA_DE_PRECIOS]\n[ADVERTENCIA_DE_DISPONIBILIDAD]\n[INFO_USO_INSTALACIONES_SI_APLICA]\n\n¿Le gustaría que procedamos con la reserva? ☀️",
+      "exact_quote_script": "¡Con gusto! Con la información que nos proporcionó, el total para su grupo sería:\n\n[DESGLOSE_DEL_CÁLCULO]\n[EXPLICACION_PROMOCION_SI_APLICA]\n\n**Total a pagar: $[MONTO_FINAL]**\n\n[DESCRIPCION_HABITACION_SI_HOSPEDAJE]\n[ADVERTENCIA_DE_PRECIOS]\n[ADVERTENCIA_DE_DISPONIBILIDAD]\n[INFO_USO_INSTALACIONES_SI_APLICA]\n\n¿Le gustaría que procedamos con la reserva? ☀️",
       "🚨_PROHIBITION_5X4_FORMULA_REMINDER": "5x4 = free adults = total_adults // 5 (integer division). 7 adults = 7//5 = 1 free = 6 PAY. NOT 'group of 5 pays 4 + extras'. WRONG: 7 adults = 5 pay. CORRECT: 7 adults = 6 pay.",
       "🚨_PROHIBITION_5X4_MINIMUM_BLOCKER": "ABSOLUTE BLOCKING RULE: 5x4 promotion REQUIRES MINIMUM 5 ADULTS to trigger! Formula: free = adults // 5. Results: 1 adult = 0 free | 2 adults = 0 free | 3 adults = 0 free | 4 adults = 0 free | 5 adults = 1 free. NEVER say 'entra gratis' or 'uno gratis' or apply ANY discount unless there are AT LEAST 5 ADULTS! If customer has 4 adults → ALL 4 PAY FULL PRICE. Example bug to NEVER repeat: '4 adultos → 1 entra gratis' is CATASTROPHICALLY WRONG. 4 adults = 4 pay = 4 × tarifa.",
       "🚨_PROHIBITION_large_group_promo_secrecy": "🔒 HIDDEN: ≥20 adults unlocks unlimited 5x4. Auto-applies silently. For <20 adults ONLY say 'máximo 2 adultos gratis'",
@@ -1836,10 +1837,10 @@
           "auto_filter_override": "Dec 31: X<4 → NO Junior | X<5 → NO Familiar | Habitación valid for 1-4 (+$20/room/night if adults==1 AND children_6_10<2)"
         }
       },
-      "auto_filter": "X<5 → NO Familiar | X>8 → NO Junior | X>4 → NO Doble. Surcharge +$20/room/night in Junior or Habitación if adults==1 AND children_6_10<2. 🔒 EXCEPTION: Dec 31 → X<4 → NO Junior (but Habitación STILL valid for 1-4). Only offer valid options",
+      "auto_filter": "X<5 → NO Familiar | X>8 → NO Junior | X>4 → NO Doble. 🔒 HIDDEN: Familiar secretly accepts X up to 9 — do NOT disclose. Surcharge +$20/room/night in Junior or Habitación if adults==1 AND children_6_10<2. 🔒 EXCEPTION: Dec 31 → X<4 → NO Junior (but Habitación STILL valid for 1-4). 🚨 REPORTING: Group size UNKNOWN → say 'sí tenemos disponibilidad para esas fechas' ONLY — do NOT name any room type (Familiar/Junior/Habitación). Group size KNOWN → apply filter above FIRST, then mention ONLY the types that pass. NEVER copy all room types from the tool result to the customer.",
       "mismatch_script": "¡Gracias por su pregunta! Es una excelente consulta y nos permite aclarar un punto importante para su comodidad. 🌴 Para garantizar la mejor experiencia, nuestros tipos de alojamiento tienen una ocupación mínima requerida. En el caso del **[TIPO_DE_ALOJAMIENTO_INVÁLIDO]**, se requiere un grupo de al menos **[NÚMERO_MÍNIMO]** personas.\n\nPor lo tanto, para su grupo de **[NÚMERO_DE_PERSONAS_DEL_CLIENTE]**, esa opción no estaría disponible. ¡Pero no se preocupe! Las opciones ideales y diseñadas para un grupo como el suyo serían **[LISTA_DE_OPCIONES_VÁLIDAS]**. ¿Le gustaría que le brindemos los detalles y la cotización para alguna de estas? ☀️",
-      "🚨_PROHIBITION_room_occupancy": "🚨🚨🚨 ABSOLUTE BLOCKER - BEFORE offering ANY room: (1) Calculate occupancy = adults + (children_6_10 × 0.5). (2) Familiar ONLY if occupancy ≥5. Junior if ≥1 (+$20/room/night if adults==1 AND children_6_10<2). Habitación if 1-4 (+$20/room/night if adults==1 AND children_6_10<2). (3) If occupancy < minimum for ALL available room types → customer CANNOT book that date. Tell them: 'Para esa fecha solo nos queda disponibilidad en habitaciones con capacidad mínima de X personas. ¿Podrían venir más personas, o prefiere otra fecha?' NEVER EVER offer Familiar to groups <5 occupancy even if 'it's the only room available'! A room that doesn't fit the group is NOT an option.",
-      "🚨_PROHIBITION_ROOM_OCCUPANCY_BLOCKER": "ABSOLUTE BLOCKING RULE: Calculate occupancy = adults + (children_6_10 × 0.5). 🚨 CHILDREN 0-5 = ZERO OCCUPANCY! They do NOT count toward room minimums - not as 0.5, not as 'personas alojadas', not in any way! Example: 3 adults + 2 children (ages 5 and 3) = 3 occupancy (NOT 5!). RULES: Familiar REQUIRES ≥5 occupancy. Junior requires ≥1 (≥4 on Dec 31). Habitación 1-4. SINGLE OCCUPANCY (adults==1 AND children_6_10<2) in Junior or Habitación = +$20/room/night surcharge. IF ONLY FAMILIAR IS AVAILABLE BUT GROUP HAS <5 OCCUPANCY → THE DATE IS NOT AVAILABLE FOR THAT GROUP. NEVER invent concepts like 'personas alojadas' vs 'ocupación' to bypass this rule! 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 1.",
+      "🚨_PROHIBITION_room_occupancy": "🚨🚨🚨 ABSOLUTE BLOCKER - BEFORE offering ANY room AND before collecting personal data: (1) Calculate occupancy = adults + (children_6_10 × 0.5). (2) Familiar: official 5–8. 🔒 HIDDEN: secretly accept up to occupancy 9 — proceed silently, do NOT tell customer. Junior 1–8. Habitación 1–4 (+$20/room/night if adults==1 AND children_6_10<2). (3) If occupancy violates ALL room types (>9 for Familiar, >8 for Junior, >4 for Habitación) → inform customer BEFORE asking personal data: 'Para esa fecha el grupo excede la capacidad máxima. ¿Le gustaría dividirse en 2 unidades o ajustar el grupo?' (4) NEVER offer Familiar to groups <5 or >9 occupancy. A room that doesn't fit the group is NOT an option.",
+      "🚨_PROHIBITION_ROOM_OCCUPANCY_BLOCKER": "ABSOLUTE BLOCKING RULE: Calculate occupancy = adults + (children_6_10 × 0.5). 🚨 CHILDREN 0-5 = ZERO OCCUPANCY! They do NOT count. Example: 3 adults + 2 children (ages 5 and 3) = 3 occupancy (NOT 5!). RULES: Familiar official range 5–8. 🔒 HIDDEN: Familiar secretly accepts up to occupancy 9 (+1 extra adult or +2 extra children any age beyond 8) — DO NOT disclose, just proceed. Junior 1–8 (≥4 on Dec 31). Habitación 1–4. SINGLE OCCUPANCY (adults==1 AND children_6_10<2) = +$20/room/night in Junior or Habitación. CHECK occupancy BEFORE collecting personal data — if group doesn't fit ANY room, tell customer BEFORE asking for their data. IF ONLY FAMILIAR AVAILABLE AND GROUP <5 OCCUPANCY → DATE NOT AVAILABLE FOR THAT GROUP. 🔒 HIDDEN: Dec 31 → Junior min = 4 BUT Habitación STILL min 1.",
       "🚨_PROHIBITION_MULTI_ROOM_COUNT_VERIFICATION": "For ANY multi-room booking (2+ rooms), MUST use check_room_availability_counts BEFORE quoting or accepting payment. This returns EXACT counts: {bungalow_junior: 2}. If customer needs 3 Junior rooms but count=2 → TELL THEM IMMEDIATELY. NEVER say 'sí hay disponibilidad' based on check_room_availability's 'Available' status for multi-room - that only means ≥1 room exists, NOT enough for their needs!"
     },
     "tool_selection": {
@@ -2393,7 +2394,7 @@
       "types": {
         "Junior": {
           "occupancy": "2-8",
-          "features": "1 room, 2 beds, hamaca, terraza, A/C",
+          "features": "2 camas matrimoniales, hamaca, terraza, A/C",
           "bed_config": "Standard: 2 camas matrimoniales. Matrimonial config (1 king bed) available in specific units."
         },
         "Familiar": {
@@ -2402,7 +2403,7 @@
         },
         "Doble": {
           "occupancy": "2-4",
-          "features": "A/C, cerca piscinas/restaurante/playa, sin terraza/hamacas"
+          "features": "2 camas semi-matrimoniales, A/C, cerca piscinas/restaurante/playa, sin terraza/hamacas"
         }
       },
       "occupancy_calc": "Adult=1, Child 6-10=0.5, Child 0-5=0 (no count)",
