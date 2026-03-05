@@ -2,10 +2,14 @@ import sqlite3
 import os
 import threading
 import logging
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+# Track last cleanup time to throttle database cleanup operations
+_last_cleanup_time = 0
 
 DB_PATH = os.environ.get("THREAD_DB_PATH", "thread_store.db")
 
@@ -82,7 +86,21 @@ def init_message_buffer_db():
         )
         """)
         conn.commit()
-        logger.info("Processing lock table initialized")
+        
+        # Create webhook_messages table to store all bot-seen and bot-sent messages
+        # for comparison with WATI API messages to find missed agent interactions
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS webhook_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wa_id TEXT NOT NULL,
+            role TEXT NOT NULL,        -- 'user' or 'assistant'
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wm_wa_id_ts ON webhook_messages(wa_id, timestamp DESC)")
+        conn.commit()
+        logger.info("Processing lock and webhook_messages tables initialized")
 
 def buffer_message(wa_id: str, message_type: str, content: str, caption: str = None, reply_context_id: str = None):
     """Buffer a message with optional caption and reply context.
@@ -291,3 +309,81 @@ def cleanup_old_buffered_messages(max_age_minutes: int = 5):
             return total
         
         return 0
+
+def cleanup_old_webhook_messages(max_age_days: int = 30):
+    """Clean up old webhook messages to prevent infinite table growth."""
+    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+    cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+    
+    with get_conn() as conn:
+        cursor = conn.execute("DELETE FROM webhook_messages WHERE timestamp < ?", (cutoff_str,))
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted > 0:
+            logger.info(f"[WEBHOOK_CLEANUP] Deleted {deleted} old webhook messages (older than {max_age_days} days)")
+        return deleted
+
+def store_webhook_message(wa_id: str, role: str, content: str):
+    """Store a message received via webhook or sent by the bot.
+    Used for detecting missed agent interactions by comparing against WATI API.
+    
+    Args:
+        wa_id: WhatsApp ID
+        role: 'user' for incoming, 'assistant' for outgoing
+        content: The text content of the message
+    """
+    global _last_cleanup_time
+    
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO webhook_messages (wa_id, role, content, timestamp) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                (wa_id, role, content)
+            )
+            conn.commit()
+            
+        # Run cleanup at most once per day
+        current_time = time.time()
+        if current_time - _last_cleanup_time > 86400:  # 24 hours
+            try:
+                cleanup_old_webhook_messages()
+            except Exception as cleanup_err:
+                logger.warning(f"[WEBHOOK_CLEANUP] Failed to clean up old messages: {cleanup_err}")
+            finally:
+                _last_cleanup_time = current_time
+                
+    except Exception as e:
+        # Never block the main flow if storing fails
+        logger.error(f"[WEBHOOK_STORE] Failed to store webhook message for {wa_id}: {e}")
+
+def get_stored_webhook_messages(wa_id: str, role: str = None, limit: int = 1000) -> list:
+    """Get recent webhook messages for a specific conversation.
+    
+    Args:
+        wa_id: WhatsApp ID
+        role: Optional filter ('user' or 'assistant'). If None, returns both.
+        limit: Maximum number of messages to return. Default 1000 to ensure we 
+               don't miss older messages when comparing against WATI API.
+               
+    Returns:
+        List of dictionaries with 'content' and 'created_at' keys.
+    """
+    try:
+        with get_conn() as conn:
+            if role:
+                cursor = conn.execute(
+                    "SELECT content, timestamp FROM webhook_messages WHERE wa_id = ? AND role = ? ORDER BY timestamp DESC LIMIT ?",
+                    (wa_id, role, limit)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT content, timestamp FROM webhook_messages WHERE wa_id = ? ORDER BY timestamp DESC LIMIT ?",
+                    (wa_id, limit)
+                )
+            
+            # Map 'timestamp' to 'created_at' to maintain compatibility with existing callers
+            return [{'content': row[0], 'created_at': row[1]} for row in cursor.fetchall()]
+            
+    except Exception as e:
+        logger.error(f"[WEBHOOK_STORE] Failed to retrieve webhook messages for {wa_id}: {e}")
+        return []

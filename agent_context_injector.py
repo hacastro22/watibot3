@@ -24,6 +24,9 @@ from webhook_vs_api_comparator import (
 # Define the go-live date for the OpenAI assistant (timezone-aware)
 ASSISTANT_GO_LIVE_DATE = datetime(2025, 7, 5, tzinfo=timezone.utc)
 
+# Operators that should be treated as the bot, not human agents
+BOT_OPERATOR_NAMES = {'Bot ', 'Bot'}
+
 def check_if_agent_context_injected(conversation_id):
     """Check if agent context has already been injected for this conversation"""
     db_path = "app/thread_store.db"
@@ -85,7 +88,7 @@ def get_agent_context_for_system_injection(wa_id):
         all_messages = []
         
         for msg in api_messages:
-            operator_name = msg.get('operatorName', '')
+            operator_name = msg.get('operatorName')  # No default — preserve None
             text = msg.get('text', '') or ''  # Handle None values
             text = text.strip() if text else ''
             timestamp = msg.get('created', '') or msg.get('timestamp', '')
@@ -94,7 +97,7 @@ def get_agent_context_for_system_injection(wa_id):
                 continue
             
             # Process ALL messages - determine type based on operatorName
-            if operator_name in ['NULL', 'Bot ', 'None', '']:
+            if operator_name is None:
                 # Customer message
                 all_messages.append({
                     'type': 'customer',
@@ -102,14 +105,21 @@ def get_agent_context_for_system_injection(wa_id):
                     'timestamp': timestamp,
                     'datetime': parse_timestamp(timestamp)
                 })
-            else:
+            elif operator_name not in BOT_OPERATOR_NAMES:
                 # Any other message (human agent, system, etc.)
                 all_messages.append({
-                    'type': 'assistant',
+                    'type': 'agent',
                     'text': text,
                     'timestamp': timestamp,
                     'datetime': parse_timestamp(timestamp),
                     'operator': operator_name
+                })
+            else:
+                all_messages.append({
+                    'type': 'assistant',
+                    'text': text,
+                    'timestamp': timestamp,
+                    'datetime': parse_timestamp(timestamp)
                 })
         
         # Sort by timestamp (ascending) and take last 100
@@ -127,6 +137,8 @@ def get_agent_context_for_system_injection(wa_id):
                 context_lines.append(f"[{timestamp_str}] Usuario: {msg['text']}")
             elif msg['type'] == 'assistant':
                 context_lines.append(f"[{timestamp_str}] Asistente: {msg['text']}")
+            elif msg['type'] == 'agent':
+                context_lines.append(f"[{timestamp_str}] Agente ({msg['operator']}): {msg['text']}")
         
         if context_lines:
             header = """HISTORIAL DE CONVERSACIÓN PARA CONTEXTO (últimos 100 mensajes):
@@ -259,7 +271,7 @@ def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timesta
             parsed_time = item['parsed_time']
             
             text = msg.get('text', '').strip()
-            operator_name = msg.get('operatorName', '')
+            operator_name = msg.get('operatorName')  # No default — preserve None
             
             if not text:
                 continue
@@ -268,9 +280,9 @@ def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timesta
             timestamp_str = parsed_time.strftime('%Y-%m-%d %H:%M') if parsed_time else 'Unknown time'
             
             # Determine message type
-            if operator_name in ['NULL', 'Bot ', 'None', '']:
+            if operator_name is None:
                 context_lines.append(f"[{timestamp_str}] Cliente: {text}")
-            else:
+            elif operator_name not in BOT_OPERATOR_NAMES:
                 context_lines.append(f"[{timestamp_str}] Agente ({operator_name}): {text}")
         
         if context_lines:

@@ -254,6 +254,12 @@ def safety_net_task(wa_id: str, message_data: dict, message_key: str):
                 logger.info(f"[SAFETY_NET] Forwarding to message buffer: wa_id={wa_id}, type={buffer_type}, content={content[:50]}...")
                 message_buffer.buffer_message(wa_id, buffer_type, content, caption, reply_context_id)
                 
+                try:
+                    if text_content:
+                        message_buffer.store_webhook_message(wa_id, 'user', text_content)
+                except Exception:
+                    logger.exception("[SAFETY_NET] Failed to store webhook message")
+                    
                 # Get old timestamps before updating (for timer callback)
                 old_webhook_timestamp = thread_store.get_last_webhook_timestamp(wa_id)
                 old_last_updated = thread_store.get_last_updated_timestamp(wa_id)
@@ -1124,6 +1130,10 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
                             raise
                 
                 if send_success:
+                    try:
+                        message_buffer.store_webhook_message(wa_id, 'assistant', ai_response)
+                    except Exception:
+                        logger.exception("[BUFFER] Failed to store bot response")
                     logger.info(f"[BUFFER] Successfully processed and sent response to {wa_id} after {attempt} attempts")
                     break  # Success! Exit retry loop
                     
@@ -1715,6 +1725,12 @@ async def wati_webhook(request: Request):
         message_buffer.buffer_message(phone_number, message_type, content, caption, reply_context_id)
         logger.info(f"[WEBHOOK] Message buffered successfully for {phone_number}")
         
+        try:
+            if text_content:
+                message_buffer.store_webhook_message(phone_number, 'user', text_content)
+        except Exception:
+            logger.exception("[WEBHOOK] Failed to store webhook message")
+            
         # CRITICAL: Wrap timer creation in try/except to prevent orphaned messages
         # If ANY exception occurs after buffering, we must handle cleanup
         try:

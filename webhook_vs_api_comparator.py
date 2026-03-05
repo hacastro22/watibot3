@@ -12,6 +12,7 @@ import sqlite3
 # Add the app directory to Python path to import config
 sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
 import config
+from message_buffer import get_stored_webhook_messages
 
 def compare_webhook_vs_api_messages(wa_id, pages=3):
     print("[ANALYSIS] Comparing webhook-received vs WATI API messages for waId: " + wa_id)
@@ -71,122 +72,19 @@ def fetch_wati_api_messages(wa_id, pages):
 
 def get_webhook_received_messages(wa_id):
     print("\n[WEBHOOK] Getting webhook-received messages from database...")
-    
-    # Check if thread_store.db exists and get webhook messages
-    db_path = "thread_store.db"
-    webhook_messages = []
-    
-    try:
-        if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Get the OpenAI thread for this waId
-            cursor.execute("SELECT thread_id FROM threads WHERE wa_id = ?", (wa_id,))
-            thread_result = cursor.fetchone()
-            
-            if thread_result:
-                thread_id = thread_result[0]
-                print("[WEBHOOK] Found OpenAI thread: " + thread_id)
-                
-                # Try to get messages from OpenAI API
-                webhook_messages = get_openai_thread_messages(thread_id)
-            else:
-                print("[WEBHOOK] No OpenAI thread found for waId: " + wa_id)
-            
-            conn.close()
-        else:
-            print("[WEBHOOK] No thread_store.db found")
-            
-    except Exception as e:
-        print("[ERROR] Error accessing database: " + str(e))
-    
+    webhook_messages = get_stored_webhook_messages(wa_id, role='user')
     print("[STATS] Webhook messages found: " + str(len(webhook_messages)))
     return webhook_messages
 
 def get_openai_thread_messages(thread_id):
     print("[OPENAI] Fetching messages from OpenAI thread: " + thread_id)
-    
-    try:
-        import openai
-        openai.api_key = config.OPENAI_API_KEY
-        
-        # With Responses API, conversation history is handled automatically
-        print("[WEBHOOK_COMPARATOR] Note: Conversation items not available with Responses API")
-        items = []
-        
-        # Extract user messages (those sent via webhook)
-        user_messages = []
-        for item in items:
-            if item.type == 'message' and item.role == 'user':
-                # Extract text content
-                content = ""
-                for content_block in item.content:
-                    if content_block.type == 'input_text':
-                        content += content_block.text
-                    elif content_block.type == 'text':
-                        content += content_block.text
-                
-                user_messages.append({
-                    'content': content,
-                    'created_at': item.created_at
-                })
-        
-        print("[OPENAI] Found " + str(len(user_messages)) + " user messages in thread")
-        return user_messages
-        
-    except Exception as e:
-        print("[ERROR] Error fetching OpenAI thread messages: " + str(e))
-        return []
+    print("[WEBHOOK_COMPARATOR] DEPRECATED: Use get_stored_webhook_messages instead")
+    return []
 
 def get_assistant_responses_from_thread(wa_id):
     print("[ASSISTANT] Getting assistant responses from OpenAI thread...")
-    
-    # Get thread ID
-    db_path = "thread_store.db"
-    assistant_messages = []
-    
-    try:
-        if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT thread_id FROM threads WHERE wa_id = ?", (wa_id,))
-            thread_result = cursor.fetchone()
-            
-            if thread_result:
-                thread_id = thread_result[0]
-                
-                import openai
-                openai.api_key = config.OPENAI_API_KEY
-                
-                # With Responses API, conversation history is handled automatically
-                print("[WEBHOOK_COMPARATOR] Note: Conversation items not available with Responses API")
-                items = []
-                
-                # Extract assistant messages
-                for item in items:
-                    if item.type == 'message' and item.role == 'assistant':
-                        # Extract text content
-                        content = ""
-                        for content_block in item.content:
-                            if content_block.type == 'output_text':
-                                content += content_block.text
-                            elif content_block.type == 'text':
-                                content += content_block.text
-                        
-                        assistant_messages.append({
-                            'content': content,
-                            'created_at': item.created_at
-                        })
-                
-                print("[ASSISTANT] Found " + str(len(assistant_messages)) + " assistant messages")
-            
-            conn.close()
-            
-    except Exception as e:
-        print("[ERROR] Error fetching assistant messages: " + str(e))
-    
+    assistant_messages = get_stored_webhook_messages(wa_id, role='assistant')
+    print("[ASSISTANT] Found " + str(len(assistant_messages)) + " assistant messages")
     return assistant_messages
 
 def find_customer_to_agent_messages(api_messages, webhook_messages, wa_id):
