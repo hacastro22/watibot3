@@ -1074,7 +1074,8 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
                 if time_diff > 300:
                     from agent_context_injector import get_missed_customer_agent_messages_for_developer_input
                     # Pass the PREVIOUS last_updated timestamp (before current response) as cutoff
-                    missed_messages_prompt = get_missed_customer_agent_messages_for_developer_input(wa_id, previous_last_updated)
+                    # Also pass current processed_messages to exclude them from the missed-messages section (prevent duplication)
+                    missed_messages_prompt = get_missed_customer_agent_messages_for_developer_input(wa_id, previous_last_updated, exclude_texts=processed_messages)
                     if missed_messages_prompt:
                         logger.info(f"[MISSED_MESSAGES_CHECK] Found {len(missed_messages_prompt)} chars of missed messages for {wa_id}")
                         # Prepend missed messages to prompt

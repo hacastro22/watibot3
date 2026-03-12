@@ -205,13 +205,15 @@ def check_if_5_minutes_since_last_webhook_message(wa_id):
         # On error, return True to be safe and check for missed messages
         return True
 
-def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timestamp_str=None):
+def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timestamp_str=None, exclude_texts=None):
     """Get customer-agent messages that occurred AFTER the assistant's last response
     
     Args:
         wa_id: WhatsApp ID of the customer
         cutoff_timestamp_str: The PREVIOUS last_updated timestamp (before current response)
                              This MUST be passed from the webhook handler to avoid race condition
+        exclude_texts: Optional iterable of message texts to exclude (the current buffered
+                      messages being processed right now, to prevent them appearing twice)
     """
     
     try:
@@ -220,6 +222,14 @@ def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timesta
         if not cutoff_timestamp_str:
             print(f"[MISSED_MESSAGES] No cutoff timestamp provided for {wa_id}, cannot determine cutoff")
             return ""
+        
+        # Build normalised exclusion set from the current buffered messages being processed.
+        # These texts are already in the prompt and must not appear again in the missed-messages section.
+        exclude_normalized = set()
+        if exclude_texts:
+            for t in exclude_texts:
+                if t:
+                    exclude_normalized.add(' '.join(t.strip().lower().split()))
         
         # Parse the cutoff timestamp
         last_assistant_response_time = datetime.strptime(cutoff_timestamp_str, '%Y-%m-%d %H:%M:%S')
@@ -275,6 +285,13 @@ def get_missed_customer_agent_messages_for_developer_input(wa_id, cutoff_timesta
             
             if not text:
                 continue
+            
+            # Skip messages that are already in the current prompt being processed
+            if exclude_normalized:
+                text_normalized = ' '.join(text.lower().split())
+                if text_normalized in exclude_normalized:
+                    print(f"[MISSED_MESSAGES] Skipping duplicate (already in current prompt): {text[:60]!r}")
+                    continue
                 
             # Format timestamp
             timestamp_str = parsed_time.strftime('%Y-%m-%d %H:%M') if parsed_time else 'Unknown time'
