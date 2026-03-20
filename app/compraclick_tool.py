@@ -317,29 +317,28 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
                 else:
                     raise e
             
+            # Schema Migration: Ensure UNIQUE index on (autorizacion, importe, tarjeta)
+            try:
+                cursor.execute("ALTER TABLE compraclick ADD UNIQUE INDEX uq_auth_importe_tarjeta (autorizacion, importe, tarjeta)")
+                conn.commit()
+                logger.info("Added UNIQUE index uq_auth_importe_tarjeta to 'compraclick' table.")
+            except Exception as e:
+                if "Duplicate key name" in str(e):
+                    logger.info("UNIQUE index uq_auth_importe_tarjeta already exists.")
+                    conn.rollback()
+                else:
+                    raise e
+            
             insert_query = """
-                INSERT INTO compraclick 
+                INSERT IGNORE INTO compraclick 
                 (date, sucursal, usuario, estado, cliente, documento, email, direccion, 
                  marcatarjeta, tarjeta, importe, autorizacion, descripcion, used)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             
-            check_duplicate_query = """
-                SELECT COUNT(*) as count FROM compraclick 
-                WHERE importe = %s AND autorizacion = %s
-            """
-            
             for row in valid_rows:
                 try:
                     mysql_date = row['date'] if isinstance(row['date'], str) else row['date'].strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    cursor.execute(check_duplicate_query, (row['importe'], row['autorizacion']))
-                    duplicate_result = cursor.fetchone()
-                    
-                    if duplicate_result and duplicate_result[0] > 0:
-                        logger.info(f"Skipping row {row['row_index']}: duplicate entry detected ({row['cliente']}, {row['date']})")
-                        skipped_count += 1
-                        continue
                     
                     cursor.execute(insert_query, (
                         mysql_date,
@@ -358,8 +357,12 @@ async def process_xls_and_insert_to_db(file_path: str) -> dict:
                         0.0
                     ))
                     
-                    inserted_count += 1
-                    logger.info(f"Inserted row {row['row_index']}: {row['cliente']}, {row['date']}, {row['importe']}")
+                    if cursor.rowcount > 0:
+                        inserted_count += 1
+                        logger.info(f"Inserted row {row['row_index']}: {row['cliente']}, {row['date']}, {row['importe']}")
+                    else:
+                        skipped_count += 1
+                        logger.info(f"Skipping row {row['row_index']}: duplicate entry detected ({row['cliente']}, {row['date']})")
                     
                 except Exception as e:
                     logger.error(f"Error inserting row {row['row_index']}: {e}")
