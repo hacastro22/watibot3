@@ -905,6 +905,7 @@ tools = [
                 },
                 "payment_method": {
                     "type": "string",
+                    "enum": ["CompraClick", "Depósito BAC"],
                     "description": "Payment method: CompraClick or Depósito BAC (determined from payment verification)"
                 },
                 "payment_amount": {
@@ -925,7 +926,7 @@ tools = [
                 },
                 "transfer_id": {
                     "type": "string",
-                    "description": "Bank transfer ID (if payment method is Depósito BAC)"
+                    "description": "🚨 REQUIRED for Depósito BAC: The transfer row ID returned by validate_bank_transfer. NEVER leave empty for bank transfers — booking BLOCKED without it."
                 },
                 "extra_beds": {
                     "type": "integer",
@@ -1037,7 +1038,7 @@ tools = [
                 },
                 "transfer_id": {
                     "type": "string",
-                    "description": "Bank transfer ID (if payment method is Depósito BAC)"
+                    "description": "🚨 REQUIRED for Depósito BAC: The transfer row ID returned by validate_bank_transfer. NEVER leave empty for bank transfers — booking BLOCKED without it."
                 },
                 "extra_beds": {
                     "type": "integer",
@@ -1977,6 +1978,7 @@ async def get_openai_response(
         "• can_automate=false means 'human completes booking', NOT 'human processes payment'.\n"
         "• Correct chain: process payment NOW → validate → check_office_status → make_booking OR transfer_to_human.\n"
         "BANK TRANSFER CHAIN: sync_bank_transfers → validate_bank_transfer → check_office_status → make_booking. ALL IN SAME TURN.\n"
+        "🚨 CRITICAL: make_booking for bank transfers REQUIRES transfer_id from validate_bank_transfer result. Without it, booking is BLOCKED.\n"
         "QUOTE CHAIN: get_price_for_date → present quote → ask to proceed. Complete in same response.\n"
         "</workflow_chains>\n\n"
         
@@ -2271,7 +2273,8 @@ async def get_openai_response(
                     previous_response_id=previous_response_id,
                     input=input_messages,
                     tools=tools,
-                    max_output_tokens=4000
+                    max_output_tokens=4000,
+                    reasoning={"effort": "low"}
                 )
                 logger.info(f"[OpenAI] Continued from response {previous_response_id}")
             else:
@@ -2283,7 +2286,8 @@ async def get_openai_response(
                     conversation=conversation_id,
                     input=input_messages,
                     tools=tools,
-                    max_output_tokens=4000
+                    max_output_tokens=4000,
+                    reasoning={"effort": "low"}
                 )
                 logger.info(f"[OpenAI] Started new conversation {conversation_id}")
             
@@ -2388,6 +2392,7 @@ async def get_openai_response(
         recovery_attempts = 0  # Circuit breaker for recovery loops
         max_recovery_attempts = 2
         all_tool_outputs = []  # Keep track for potential synthesis
+        require_high_reasoning = False  # Flag for _require_high_reasoning from tool results
         
         # FLEX TIER: Track tier state for this request
         # Start with Flex, switch to Standard when non-module tools are detected
@@ -2475,6 +2480,10 @@ async def get_openai_response(
                             result = await fn(**fn_args)
                         else:
                             result = fn(**fn_args)
+                        # Check for _require_high_reasoning flag BEFORE serialization
+                        if isinstance(result, dict) and result.pop("_require_high_reasoning", False):
+                            require_high_reasoning = True
+                            logger.info(f"[REASONING] Tool {fn_name} requested high reasoning effort")
                         output = _coerce_output_str(result)
                 except Exception as e:
                     logger.exception(f"Error executing tool {fn_name}")
@@ -2504,6 +2513,18 @@ async def get_openai_response(
                 # Capture the ID of the response that requested the tool call
                 previous_resp_id = response.id
                 
+                # Determine reasoning effort for this tool output submission:
+                # - High: if _require_high_reasoning flag was set by a tool (e.g., bank transfer gate)
+                # - Low: for rounds 1-2 (module loading + first tool decision)
+                # - None: for rounds 3+ (mechanical tool chaining)
+                reasoning_kwargs = {}
+                if require_high_reasoning:
+                    reasoning_kwargs["reasoning"] = {"effort": "high"}
+                    logger.info(f"[REASONING] Using HIGH reasoning effort for tool output round {round_count}")
+                elif round_count <= 2:
+                    reasoning_kwargs["reasoning"] = {"effort": "low"}
+                # else: no reasoning param → GPT-5.2 defaults to "none" for mechanical rounds
+                
                 # Use tracked tier (Flex if only load_additional_modules called, Standard otherwise)
                 response = await _make_responses_call(
                     use_flex=current_tier_is_flex,
@@ -2513,7 +2534,8 @@ async def get_openai_response(
                     previous_response_id=previous_resp_id,
                     input=tool_output_input,
                     tools=tools,  # Keep tools available for chaining
-                    max_output_tokens=4000
+                    max_output_tokens=4000,
+                    **reasoning_kwargs
                     # DO NOT include the 'conversation' parameter here
                 )
                 # Save tool output response ID

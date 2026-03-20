@@ -49,6 +49,39 @@ ROOM_CAPACITY = {
     "Pasadía": {"min_occupancy": 0, "max_occupancy": 999}    # No room capacity for day pass
 }
 
+def _get_conversation_history_for_error(wa_id: str, user_identifier: str = None, channel: str = None) -> str:
+    """
+    Retrieve conversation history for injection into booking error responses.
+    Uses channel-based detection: channel param distinguishes WATI (None) from ManyChat ('instagram'/'facebook').
+    
+    Args:
+        wa_id: WhatsApp ID (WATI phone) or ManyChat subscriber ID
+        user_identifier: Full user identifier for ManyChat context retrieval
+        channel: 'instagram', 'facebook' (ManyChat) or None (WATI)
+    
+    Returns:
+        Formatted conversation history string, or fallback instruction if retrieval fails.
+    """
+    fallback = (
+        "Could not retrieve conversation history. To verify if this booking was already completed, "
+        "call validate_bank_transfer with the customer's payment details (slip_date, slip_amount, booking_amount). "
+        "If it returns ALREADY_USED with a booking code, the booking is done — inform the customer. "
+        "If not, ask the customer to confirm the transfer details so you can proceed correctly."
+    )
+    try:
+        from agent_context_injector import get_agent_context_for_system_injection, get_manychat_context_for_system_injection
+        
+        if channel:  # ManyChat user (channel = "instagram" or "facebook")
+            history = get_manychat_context_for_system_injection(user_identifier) if user_identifier else ""
+        else:  # WATI user (channel is None)
+            history = get_agent_context_for_system_injection(wa_id) if wa_id else ""
+        
+        return history if history else fallback
+    except Exception as e:
+        logger.error(f"[BANK_TRANSFER_GATE] Failed to retrieve conversation history for {wa_id}: {e}")
+        return fallback
+
+
 # DUPLICATE BOOKING PREVENTION: Database-based lock using booking_locks table.
 # Uses MySQL INSERT with PRIMARY KEY for atomic cross-process locking.
 # Replaces the old in-memory dict which was process-local and didn't work
@@ -625,7 +658,9 @@ async def make_multi_room_booking(
     transfer_id: str = None,
     extra_beds: int = 0,
     extra_beds_cost: float = 0.0,
-    customer_instructions: str = None
+    customer_instructions: str = None,
+    user_identifier: str = None,
+    channel: str = None
 ) -> dict:
     """
     Process a multi-room booking using native API multi-room support.
@@ -684,8 +719,37 @@ async def make_multi_room_booking(
             "error": "authorization_number parameter is required for CompraClick payments"
         }
     
+    # 🚨 CRITICAL: Block bank transfer bookings without transfer_id to prevent duplicates
+    if payment_method == "Depósito BAC" and not transfer_id:
+        logger.warning(f"[BANK_TRANSFER_GATE] BLOCKED make_multi_room_booking for {wa_id}: missing transfer_id")
+        conversation_history = _get_conversation_history_for_error(wa_id, user_identifier, channel)
+        return {
+            "success": False,
+            "error": "transfer_id is REQUIRED for bank transfer bookings",
+            "assistant_instruction": (
+                "🚨 DO NOT tell the customer about this error. DO NOT mention any system issue. "
+                "This is an INTERNAL safeguard — analyze the situation silently and take the right action.\n\n"
+                "You called make_multi_room_booking with payment_method='Depósito BAC' but WITHOUT a valid transfer_id. "
+                "This means ONE of these:\n"
+                "(1) You forgot to pass the transfer_id from validate_bank_transfer — if so, find it in the history and retry with the correct transfer_id\n"
+                "(2) This booking was ALREADY COMPLETED earlier — if so, do NOT book again, just answer the customer's actual question\n"
+                "(3) You made a mistake calling make_multi_room_booking — the customer may have asked something unrelated to booking\n\n"
+                "READ the conversation history below CAREFULLY before deciding what to do:\n\n"
+                + conversation_history
+            ),
+            "_require_high_reasoning": True
+        }
+    
     # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
-    payment_ref = f"CC_{authorization_number}" if authorization_number else (f"BAC_{transfer_id}" if transfer_id else None)
+    # Use payment_method to determine ref type (not authorization_number which can be "N/A")
+    if payment_method == "Depósito BAC":
+        payment_ref = f"BAC_{transfer_id}" if transfer_id else None
+    else:
+        payment_ref = f"CC_{authorization_number}" if authorization_number else None
+    
+    # Defense-in-depth: if we reach here with Depósito BAC and no payment_ref, something bypassed the gate
+    if payment_method == "Depósito BAC" and payment_ref is None:
+        logger.critical(f"[DEFENSE_IN_DEPTH] make_multi_room_booking reached duplicate prevention with Depósito BAC but payment_ref=None for {wa_id}. Gate may have been bypassed!")
     if payment_ref:
         reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
         if not reserve_success:
@@ -1122,7 +1186,9 @@ async def make_booking(
     force_process: bool = False,
     extra_beds: int = 0,
     extra_beds_cost: float = 0.0,
-    customer_instructions: str = None
+    customer_instructions: str = None,
+    user_identifier: str = None,
+    channel: str = None
 ) -> dict:
     """
     Process a customer booking after payment verification.
@@ -1170,9 +1236,37 @@ async def make_booking(
             "error": "authorization_number parameter is required for CompraClick payments"
         }
     
+    # 🚨 CRITICAL: Block bank transfer bookings without transfer_id to prevent duplicates
+    if payment_method == "Depósito BAC" and not transfer_id:
+        logger.warning(f"[BANK_TRANSFER_GATE] BLOCKED make_booking for {wa_id}: missing transfer_id")
+        conversation_history = _get_conversation_history_for_error(wa_id, user_identifier, channel)
+        return {
+            "success": False,
+            "error": "transfer_id is REQUIRED for bank transfer bookings",
+            "assistant_instruction": (
+                "🚨 DO NOT tell the customer about this error. DO NOT mention any system issue. "
+                "This is an INTERNAL safeguard — analyze the situation silently and take the right action.\n\n"
+                "You called make_booking with payment_method='Depósito BAC' but WITHOUT a valid transfer_id. "
+                "This means ONE of these:\n"
+                "(1) You forgot to pass the transfer_id from validate_bank_transfer — if so, find it in the history and retry make_booking with the correct transfer_id\n"
+                "(2) This booking was ALREADY COMPLETED earlier — if so, do NOT book again, just answer the customer's actual question\n"
+                "(3) You made a mistake calling make_booking — the customer may have asked something unrelated to booking\n\n"
+                "READ the conversation history below CAREFULLY before deciding what to do:\n\n"
+                + conversation_history
+            ),
+            "_require_high_reasoning": True
+        }
+    
     # DUPLICATE BOOKING PREVENTION: ATOMIC check-and-reserve to prevent race conditions
-    # This reserves the authorization BEFORE the API call, preventing two workers from both passing
-    payment_ref = f"CC_{authorization_number}" if authorization_number else (f"BAC_{transfer_id}" if transfer_id else None)
+    # Use payment_method to determine ref type (not authorization_number which can be "N/A")
+    if payment_method == "Depósito BAC":
+        payment_ref = f"BAC_{transfer_id}" if transfer_id else None
+    else:
+        payment_ref = f"CC_{authorization_number}" if authorization_number else None
+    
+    # Defense-in-depth: if we reach here with Depósito BAC and no payment_ref, something bypassed the gate
+    if payment_method == "Depósito BAC" and payment_ref is None:
+        logger.critical(f"[DEFENSE_IN_DEPTH] make_booking reached duplicate prevention with Depósito BAC but payment_ref=None for {wa_id}. Gate may have been bypassed!")
     if payment_ref:
         reserve_success, dup_message = _reserve_authorization_atomic(payment_ref, wa_id)
         if not reserve_success:
