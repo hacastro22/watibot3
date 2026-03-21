@@ -667,6 +667,12 @@
           "action": "Mention special Christmas/New Year activities and load schedule",
           "priority": "MEDIUM"
         },
+        "semana_santa_period_inquiry": {
+          "trigger": "Customer asking about dates between Mar 27 - Apr 5, 2026",
+          "load": "MODULE_2D_SPECIAL_SCENARIOS.semana_santa_activities_rules",
+          "action": "Mention special Semana Santa activities and load schedule",
+          "priority": "MEDIUM"
+        },
         "day_use_room_inquiry": {
           "load": "MODULE_4_INFORMATION.day_use_room",
           "priority": "HIGH",
@@ -932,6 +938,10 @@
       "holiday_season_2025_2026": {
         "period": "2025-12-24 to 2026-01-04",
         "action": "Load MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_rules. After quote, add: 'Además, durante estas fechas tendremos actividades especiales de Navidad y Año Nuevo. ¿Le gustaría conocer la programación? 🎄✨'"
+      },
+      "semana_santa_2026": {
+        "period": "2026-03-27 to 2026-04-05",
+        "action": "Load MODULE_2D_SPECIAL_SCENARIOS.semana_santa_activities_rules. After quote, add: '¡Además, durante Semana Santa tendremos actividades especiales todos los días: shows de baile, música en vivo, DJ y entretenimiento familiar! ¿Le gustaría conocer la programación? 🌴🎶'"
       }
     },
     "CRITICAL_PROHIBITIONS": {
@@ -2181,6 +2191,31 @@
               }
             ]
           }
+        ]
+      }
+    },
+    "semana_santa_activities_rules": {
+      "trigger_condition": "Customer inquires about or books dates between March 27 and April 5, 2026",
+      "action_rule": "IMPERATIVO: When customer asks about prices, availability, or details for dates within Semana Santa (Mar 27 - Apr 5, 2026), proactively mention special activities. If customer shows interest, provide schedule details.",
+      "proactive_mention_script": "¡Además, le comento que durante Semana Santa tendremos actividades especiales todos los días incluyendo shows de baile, música en vivo, DJ y entretenimiento familiar! ¿Le gustaría conocer la programación completa? 🌴🎶",
+      "schedule_ref": "MODULE_2D_SPECIAL_SCENARIOS.semana_santa_resort_schedule",
+      "presentation_format": "When customer requests schedule, load schedule_ref and present the daily activities listing all time slots. Use 🌴 emoji for beach/resort vibe.",
+      "sales_integration": "IMPERATIVO: After mentioning activities, continue with normal sales flow (quotes, availability, booking). Activities are an enhancement to the value proposition, not a separate conversation track.",
+      "note": "All activities are included with accommodation packages. No additional cost for guests staying at the resort during these dates."
+    },
+    "semana_santa_resort_schedule": {
+      "resort_schedule": {
+        "title": "Programación de Actividades - Semana Santa 2026",
+        "period": "29 de marzo - 5 de abril 2026",
+        "applies_to": "Domingo 29 Mar, Lunes 30 Mar, Martes 31 Mar, Miércoles 1 Abr, Jueves 2 Abr, Viernes 3 Abr, Sábado 4 Abr, Domingo 5 Abr",
+        "note": "Same daily schedule repeats every day of the period",
+        "daily_activities": [
+          {"time": "10:30", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+          {"time": "17:00", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
+          {"time": "19:00", "description": "Cantante en vivo"},
+          {"time": "20:00", "description": "Show infantil del grupo de danza Crash"},
+          {"time": "20:30", "description": "Show de baile del grupo de danza Crash"},
+          {"time": "21:00", "description": "Cantante + DJ en vivo"}
         ]
       }
     },

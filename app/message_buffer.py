@@ -113,10 +113,22 @@ def buffer_message(wa_id: str, message_type: str, content: str, caption: str = N
         reply_context_id: Optional ID of message being replied to
     """
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO message_buffer (wa_id, message_type, content, caption, reply_context_id, timestamp) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (wa_id, message_type, content, caption, reply_context_id)
+        cursor = conn.execute(
+            """
+            INSERT INTO message_buffer (wa_id, message_type, content, caption, reply_context_id, timestamp)
+            SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+            WHERE NOT EXISTS (
+                SELECT 1 FROM message_buffer
+                WHERE wa_id = ? AND message_type = ? AND content = ?
+                  AND timestamp >= datetime('now', '-60 seconds')
+            )
+            """,
+            (wa_id, message_type, content, caption, reply_context_id,
+             wa_id, message_type, content)
         )
+        if cursor.rowcount == 0:
+            logger.warning(f"[BUFFER_DEDUP] Skipped duplicate buffer insert for {wa_id} (type={message_type})")
+            return
         conn.commit()
 
 def get_and_clear_buffered_messages(wa_id: str, since_seconds: int = 35):

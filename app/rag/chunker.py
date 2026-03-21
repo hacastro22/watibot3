@@ -172,6 +172,8 @@ _QUERY_AUGMENTATION = {
     # "temporada" or "promoción" queries which should match promotion_rules instead
     "holiday_activities_rules": "actividades navidad año nuevo diciembre eventos programación qué hay en navidad",
     "holiday_resort_schedule": "horario agenda programación actividades día por día schedule resort diciembre enero",
+    "semana_santa_activities_rules": "actividades semana santa marzo abril eventos programación qué hay en semana santa pascua",
+    "semana_santa_resort_schedule": "horario agenda programación actividades semana santa día por día schedule resort marzo abril danza crash koskillín",
     "new_year_party_inquiry_protocol": "fiesta fin de año año nuevo 31 diciembre celebración noche vieja party new year",
     "special_date_notification_protocol": "31 diciembre año nuevo evento especial fin de año noche vieja",
     # ── Invitational / Events ──

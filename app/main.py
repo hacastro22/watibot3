@@ -213,8 +213,8 @@ def safety_net_task(wa_id: str, message_data: dict, message_key: str):
         message_key: Unique message identifier
     """
     try:
-        # Wait 10 seconds for message to arrive at main webhook
-        time.sleep(10)
+        # Wait 15 seconds for message to arrive at main webhook
+        time.sleep(15)
         
         with pending_messages_lock:
             entry = pending_messages.get(message_key)
@@ -229,7 +229,7 @@ def safety_net_task(wa_id: str, message_data: dict, message_key: str):
                 return
             
             # Message was NOT processed - WATI network hiccup detected!
-            logger.warning(f"[SAFETY_NET] WATI hiccup detected! Message not received at main webhook after 10s: wa_id={wa_id}, message_key={message_key}")
+            logger.warning(f"[SAFETY_NET] WATI hiccup detected! Message not received at main webhook after 15s: wa_id={wa_id}, message_key={message_key}")
             
             # Extract message details
             message_type = message_data.get("type", "text")
@@ -296,7 +296,7 @@ def safety_net_task(wa_id: str, message_data: dict, message_key: str):
             logger.info(f"[SAFETY_NET] Removed tracking for message_key: {message_key}")
         
         # Clean up after 60 seconds
-        time.sleep(50)  # Already waited 10, wait 50 more = 60 total
+        time.sleep(45)  # Already waited 15, wait 45 more = 60 total
         with pending_messages_lock:
             if message_key in pending_messages:
                 del pending_messages[message_key]
