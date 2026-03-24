@@ -1891,12 +1891,12 @@ async def get_openai_response(
     #   → Sent on EVERY API call for maximum adherence
     # developer role: base modules (DECISION_TREE, MODULE_DEPENDENCIES, CORE_CONFIG)
     #   → Sent on msg 1, then every 8th (8, 16, 24...) + on rotation/recovery
-    #   → Also sent if conversation is stale (>30 min since last response)
+    #   → Also sent if conversation is stale (>3 hours since last response)
     #   → Persists via previous_response_id between refreshes
     # ================================================================
     should_send_developer = (current_message_count == 1 or current_message_count % 8 == 0)
     
-    # Staleness check: re-send developer if >30 min since last assistant response
+    # Staleness check: re-send developer if >3 hours since last assistant response
     # This covers pre-existing conversations and long gaps where context may drift
     if not should_send_developer:
         from .thread_store import get_last_updated_timestamp
@@ -1904,7 +1904,7 @@ async def get_openai_response(
         if last_updated_str:
             try:
                 last_updated = datetime.fromisoformat(last_updated_str)
-                if datetime.utcnow() - last_updated > timedelta(minutes=30):
+                if datetime.utcnow() - last_updated > timedelta(hours=3):
                     should_send_developer = True
                     logger.info(f"[MSG_STRATEGY] Stale conversation detected ({last_updated_str}), forcing developer refresh")
             except (ValueError, TypeError):

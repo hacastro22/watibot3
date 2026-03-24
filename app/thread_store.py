@@ -87,8 +87,7 @@ def set_thread_id(wa_id: str, thread_id: str):
             INSERT INTO threads (wa_id, thread_id, created_at, last_updated, history_imported)
             VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
             ON CONFLICT(wa_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                last_updated = excluded.last_updated;
+                thread_id = excluded.thread_id;
         """, (wa_id, thread_id))
         conn.commit()
 
@@ -118,8 +117,7 @@ def save_conversation_id(identifier: str, conversation_id: str):
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
                 ON CONFLICT(wa_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
-                    conversation_id = excluded.conversation_id,
-                    last_updated = excluded.last_updated;
+                    conversation_id = excluded.conversation_id;
             """, (identifier, conversation_id, conversation_id))
         conn.commit()
 
@@ -174,8 +172,7 @@ def update_last_webhook_timestamp(wa_id: str):
             INSERT INTO threads (wa_id, thread_id, last_webhook_timestamp, created_at, last_updated, history_imported)
             VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
             ON CONFLICT(wa_id) DO UPDATE SET
-                last_webhook_timestamp = CURRENT_TIMESTAMP,
-                last_updated = CURRENT_TIMESTAMP;
+                last_webhook_timestamp = CURRENT_TIMESTAMP;
         """, (wa_id, wa_id))
         conn.commit()
 
@@ -183,17 +180,6 @@ def get_last_webhook_timestamp(wa_id: str) -> Optional[str]:
     """Retrieves the last webhook message timestamp for missed message detection."""
     with get_conn() as conn:
         cur = conn.execute("SELECT last_webhook_timestamp FROM threads WHERE wa_id = ?", (wa_id,))
-        row = cur.fetchone()
-        return row[0] if row and row[0] else None
-
-def get_last_updated_timestamp(wa_id: str) -> Optional[str]:
-    """Retrieves the last_updated timestamp (when assistant last responded).
-    
-    This is used as the cutoff for missed message detection - we want messages
-    that arrived AFTER the assistant's last response.
-    """
-    with get_conn() as conn:
-        cur = conn.execute("SELECT last_updated FROM threads WHERE wa_id = ?", (wa_id,))
         row = cur.fetchone()
         return row[0] if row and row[0] else None
 
