@@ -929,7 +929,8 @@
       "trigger": "pricing/booking inquiry",
       "flow": "Execute FIRST matching: (1) ≥30 people → group_and_event_handling | (2) Pasadía/0 nights → quote_generation_protocol | (3) Accommodation <30 → pre_quote_member_check",
       "block": "NO accommodation quote without pre_quote_member_check",
-      "🚨🚨🚨 AVAILABILITY_GATE": "When customer provides DATES + GROUP SIZE for ACCOMMODATION (not Pasadía): you MUST call check_room_availability or check_smart_availability BEFORE calling get_price_for_date and quoting. Flow: dates+group → availability tool → THEN get_price_for_date → quote. NEVER skip availability check for accommodation quotes even if customer only asked for price."
+      "🚨🚨🚨 AVAILABILITY_GATE": "When customer provides DATES + GROUP SIZE for ACCOMMODATION (not Pasadía): you MUST call check_room_availability or check_smart_availability BEFORE calling get_price_for_date and quoting. Flow: dates+group → availability tool → THEN get_price_for_date → quote. NEVER skip availability check for accommodation quotes even if customer only asked for price.",
+      "🚨 SPECIAL_PERIODS_CHECK": "FOR EVERY quote or availability check: once dates are known, compare them against ALL entries in CORE_CONFIG.special_periods. If the requested dates overlap with any special period's date range → MANDATORY: load that period's module AND append the period's proactive message after the quote. This applies to ALL packages (accommodation AND pasadía). Do not skip this check for any quote."
     },
     "EMERGENCY_MEMBER_DETECTION": {
       "ref": "→ MODULE_1_CRITICAL_WORKFLOWS.member_handling.initial_redirection_script",
@@ -938,6 +939,7 @@
       "block": "ZERO assistance: NO dates/quotes/availability/data"
     },
     "special_periods": {
+      "🚨 MANDATORY_RULE": "Cross-reference this table for EVERY quote and availability request. If the requested dates fall within any period below (even partially — one night overlap is enough), execute that period's action before completing the response.",
       "holiday_season_2025_2026": {
         "period": "2025-12-24 to 2026-01-04",
         "action": "Load MODULE_2D_SPECIAL_SCENARIOS.holiday_activities_rules. After quote, add: 'Además, durante estas fechas tendremos actividades especiales de Navidad y Año Nuevo. ¿Le gustaría conocer la programación? 🎄✨'"
