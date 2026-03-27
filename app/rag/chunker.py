@@ -150,6 +150,7 @@ _QUERY_AUGMENTATION = {
     "date_change_request_protocol": "cambiar fecha mover reserva cambio de fecha reprogramar otra fecha",
     "reservation_document_request_protocol": "comprobante de reserva confirmación documento de reserva necesito el comprobante",
     "special_request_protocol": "solicitud especial pedido extra requerimiento",
+    "reservation_inquiry_protocol": "mi reserva código reservación estado de mi reserva consultar reserva HR número de reserva verificar reserva información de mi booking",
     "complaint_resolution_protocol": "queja reclamo insatisfecho mal servicio problema",
     "custom_decoration_request_protocol": "decoración especial personalizada arreglo flores globos cumpleaños aniversario",
     "check_in_out_query": "check-in check-out hora entrada salida a qué hora llego a qué hora entrego",

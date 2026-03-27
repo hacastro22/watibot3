@@ -1,11 +1,12 @@
 # Entry point for the FastAPI app
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
 import logging
 
 from . import config, openai_agent, wati_client
+from . import compraclick_tool, bank_transfer_tool
 from . import thread_store
 from . import message_buffer
 from . import whisper_client
@@ -1833,3 +1834,41 @@ async def check_orphaned_messages():
             "status": "error",
             "error": str(e)
         }
+
+
+# --- Internal LAN API endpoints (IP-restricted + API key) ---
+
+ALLOWED_INTERNAL_IPS = {"10.128.0.19"}
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+
+def _validate_internal_request(request: Request, api_key: str):
+    """Validate that the request comes from an allowed LAN IP and has a valid API key.
+    
+    Raises HTTPException 403 if the IP is not allowed or the API key is invalid.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    if client_ip not in ALLOWED_INTERNAL_IPS:
+        logger.warning(f"[INTERNAL_API] Rejected request from unauthorized IP: {client_ip}")
+        raise HTTPException(status_code=403, detail="Forbidden: IP not allowed")
+    if not INTERNAL_API_KEY or api_key != INTERNAL_API_KEY:
+        logger.warning(f"[INTERNAL_API] Rejected request from {client_ip}: invalid API key")
+        raise HTTPException(status_code=403, detail="Forbidden: invalid API key")
+
+
+@app.post("/api/sync-compraclick")
+async def api_sync_compraclick(request: Request, x_api_key: str = Header(...)):
+    """Trigger CompraClick payment sync. Restricted to internal LAN."""
+    _validate_internal_request(request, x_api_key)
+    logger.info(f"[INTERNAL_API] sync-compraclick triggered from {request.client.host}")
+    result = await compraclick_tool.sync_compraclick_payments()
+    return result
+
+
+@app.post("/api/sync-bank-transfers")
+async def api_sync_bank_transfers(request: Request, x_api_key: str = Header(...)):
+    """Trigger bank transfer sync. Restricted to internal LAN."""
+    _validate_internal_request(request, x_api_key)
+    logger.info(f"[INTERNAL_API] sync-bank-transfers triggered from {request.client.host}")
+    result = await bank_transfer_tool.sync_bank_transfers()
+    return result

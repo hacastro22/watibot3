@@ -1249,6 +1249,21 @@ tools = [
             },
             "required": ["phone_number", "response_text"]
         }
+    },
+    {
+        "type": "function",
+        "name": "lookup_booking",
+        "description": "Look up an existing booking by reservation code. Code MUST start with 'HR' (e.g. 'HR28547'). Strips prefix and queries database. Use ONLY for regular guests — codes starting with 'SOC' are members (trigger member protocol instead).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reservation_code": {
+                    "type": "string",
+                    "description": "Full reservation code including 'HR' prefix (e.g. 'HR28547'). Must start with 'HR'."
+                }
+            },
+            "required": ["reservation_code"]
+        }
     }
 ]
 
@@ -1739,6 +1754,7 @@ available_functions = {
     "make_multi_room_booking": booking_tool.make_multi_room_booking,
     "send_email": email_service.send_email,
     "notify_operations_department": operations_tool.notify_operations_department,
+    "lookup_booking": database_client.lookup_booking,
     "load_additional_modules": load_additional_modules,
 }
 

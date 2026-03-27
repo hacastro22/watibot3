@@ -314,8 +314,9 @@
         },
         "wants_reservation_status": {
           "intent": "Customer checking booking status/confirmation",
-          "action": "Request code → provide status",
-          "module": "MODULE_3_SERVICE_FLOWS.reservation_inquiry_protocol"
+          "action": "Request code → check prefix → route",
+          "module": "MODULE_3_SERVICE_FLOWS.reservation_inquiry_protocol",
+          "🚨 CODE_PREFIX_ROUTING": "If code starts with 'HR' → call lookup_booking. If code starts with 'SOC' → MEMBER detected → PRIORITY_1 member_identity_detected. If customer gives only a number (no prefix) → ASK: '¿Podría proporcionarme el código completo? Este inicia con letras, por ejemplo HR seguido de números.'"
         },
         "has_complaint": {
           "intent": "Customer expressing dissatisfaction",
@@ -799,7 +800,9 @@
           "assess": "simple=handle, complex=escalate"
         },
         "wants_reservation_status": {
-          "load": "MODULE_3_SERVICE_FLOWS.reservation_inquiry_protocol"
+          "load": "MODULE_3_SERVICE_FLOWS.reservation_inquiry_protocol",
+          "tools": ["lookup_booking"],
+          "🚨 CODE_PREFIX_ROUTING": "HR=regular guest→lookup_booking | SOC=member→PRIORITY_1 | number only→ask for full code"
         },
         "has_complaint": {
           "load": "MODULE_3_SERVICE_FLOWS.complaint_resolution_protocol"
@@ -2329,16 +2332,14 @@
     },
     "reservation_inquiry_protocol": {
       "trigger_condition": "Cliente consulta sobre estado de su reserva existente",
-      "action_rule": "IMPERATIVO: Solicitar código de reserva para verificación",
-      "required_information": [
-        "Código de reserva o nombre de la reserva"
+      "action_rule": "IMPERATIVO: Solicitar código de reserva completo para verificación",
+      "workflow": [
+        "1. Ask customer for reservation code",
+        "2. CHECK PREFIX: 'HR' → step 3 | 'SOC' → STOP, this is a MEMBER → execute member_identity_detected (PRIORITY_1) | number only (no letters) → ask: '¿Podría proporcionarme el código completo? Este inicia con letras, por ejemplo HR seguido de números.'",
+        "3. Call lookup_booking(reservation_code='HR...') → present booking info in friendly format",
+        "4. Offer additional assistance"
       ],
-      "verification_process": [
-        "1. Solicitar código de reserva",
-        "2. Confirmar datos básicos (fechas, tipo de alojamiento)",
-        "3. Proporcionar información solicitada",
-        "4. Ofrecer asistencia adicional si es necesaria"
-      ]
+      "🚨 CRITICAL": "ONLY use lookup_booking for HR codes (regular guests). SOC codes = member = redirect to member protocol. NEVER call lookup_booking with SOC codes."
     },
     "reception_communication_protocol": {
       "intent": "Customer with existing reservation wants to send a message or request to reception for their arrival",
@@ -2588,7 +2589,7 @@
       },
       "towels": {
         "provided": "Familiar: 4 bath + 2 hand | Junior/Doble: 2 bath + 1 hand",
-        "rule": "Room use only. NOT for pool/beach/common areas. Extra: $2/towel at reception"
+        "rule": "Room/bungalow use ONLY. 🚨 NO towels (provided OR rented) may be taken to pool, beach, or any common area. Extra room towel: $2/towel at reception — still for room use only, NOT for pool/beach"
       },
       "safety": {
         "lifeguards": "Beach: weekends + holidays ONLY. Pool: ask reception. Mon-Fri: NO beach lifeguard",

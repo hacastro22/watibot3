@@ -392,3 +392,92 @@ def get_price_for_date(date_str: str) -> dict:
                 conn.close()
     
     return execute_with_retry(_execute_price_query, f"get_price_for_date({date_str})")
+
+
+def lookup_booking(reservation_code: str) -> dict:
+    """
+    Looks up a booking in user_books by reservation code.
+
+    The code must include the "HR" prefix (e.g. "HR28547"). The prefix is
+    stripped before querying, since the ``reserva`` column stores the numeric
+    part only.
+
+    Args:
+        reservation_code: Full reservation code including "HR" prefix.
+
+    Returns:
+        dict with booking details on success, or an error dict if not found.
+    """
+    if not reservation_code:
+        return {"success": False, "error": "missing_code", "customer_message": "Por favor proporcione su código de reserva completo (ejemplo: HR12345)."}
+
+    code = reservation_code.strip().upper()
+    if not code.startswith("HR"):
+        return {"success": False, "error": "invalid_prefix", "customer_message": "El código de reserva debe iniciar con 'HR'. Por favor verifique e intente de nuevo."}
+
+    numeric_code = code[2:]  # Strip "HR" prefix
+    if not numeric_code:
+        return {"success": False, "error": "missing_number", "customer_message": "El código de reserva parece incompleto. Debe ser 'HR' seguido de números (ejemplo: HR12345)."}
+
+    logger.info(f"[BOOKING_LOOKUP] Looking up reservation code: {code} (query value: {numeric_code})")
+
+    def _execute_lookup():
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            query = """
+                SELECT timestamp, titulo, firstname, lastname, phone,
+                       checkIn, checkOut, acomodacion, adultcount,
+                       childcount, childcount1, payway, loadamount,
+                       email, adultrate, childrate, reseramount,
+                       comment, service, cancel_flag
+                FROM user_books
+                WHERE reserva = %s
+            """
+            cursor.execute(query, (numeric_code,))
+            result = cursor.fetchone()
+
+            if not result:
+                logger.info(f"[BOOKING_LOOKUP] No booking found for code {code}")
+                return {
+                    "success": False,
+                    "error": "not_found",
+                    "customer_message": "No se encontró una reserva con el código proporcionado. Por favor verifique que el código sea correcto e intente de nuevo."
+                }
+
+            booking = {
+                "success": True,
+                "codigo_reserva": code,
+                "fecha_reserva": str(result.get("timestamp") or ""),
+                "titulo": result.get("titulo") or "",
+                "nombre_completo": f"{result.get('firstname') or ''} {result.get('lastname') or ''}".strip(),
+                "telefono": result.get("phone") or "",
+                "correo_confirmacion": result.get("email") or "",
+                "fecha_entrada": result.get("checkIn") or "",
+                "fecha_salida": result.get("checkOut") or "",
+                "tipo_habitacion": result.get("acomodacion") or "",
+                "adultos": result.get("adultcount") or "0",
+                "ninos_0_5": result.get("childcount") or "0",
+                "ninos_6_10": result.get("childcount1") or "0",
+                "paquete": result.get("service") or "",
+                "metodo_pago": result.get("payway") or "",
+                "monto_pagado": result.get("loadamount") or "0",
+                "monto_total_reserva": result.get("reseramount") or "0",
+                "tarifa_adulto": result.get("adultrate") or "0",
+                "tarifa_nino": result.get("childrate") or "0",
+                "notas": result.get("comment") or "",
+                "cancelada": str(result.get("cancel_flag") or "no").strip().lower() != "no",
+            }
+
+            logger.info(f"[BOOKING_LOOKUP] Found booking {code}: {booking['nombre_completo']}, "
+                        f"check-in={booking['fecha_entrada']}, cancelled={booking['cancelada']}")
+            return booking
+        finally:
+            if conn and conn.is_connected():
+                try:
+                    cursor.close()
+                except:
+                    pass
+                conn.close()
+
+    return execute_with_retry(_execute_lookup, f"lookup_booking({code})")
