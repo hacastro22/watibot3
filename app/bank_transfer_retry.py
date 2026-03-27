@@ -386,13 +386,46 @@ async def _attempt_validation_and_booking(phone_number: str, payment_data: Dict[
             logger.warning(f"Bank transfer sync failed for {phone_number}: {sync_result.get('error')}")
             return False
             
-        # Validate the payment
+        # Validate the payment — try original slip_date first
+        slip_date = payment_data["slip_date"]
         validation_result = validate_bank_transfer(
-            slip_date=payment_data["slip_date"],
+            slip_date=slip_date,
             slip_amount=payment_data["slip_amount"],
             booking_amount=payment_data["booking_amount"]
         )
-        
+
+        # Late-night Transfer365 date-shift: transfers made after 10 PM may be posted
+        # by the bank with the next calendar day's date. If slip_date is yesterday in
+        # El Salvador time and today (SV) is the next day, retry with slip_date + 1 day.
+        # NOTE: server runs UTC; El Salvador is GMT-6, so midnight SV = 06:00 UTC.
+        # Using SV timezone prevents false positives from 6 PM SV (= midnight UTC) onward.
+        if not validation_result.get("success"):
+            try:
+                from pytz import timezone as pytz_tz
+                el_salvador_tz = pytz_tz("America/El_Salvador")
+                slip_date_obj = datetime.strptime(slip_date, "%Y-%m-%d")
+                today_sv = datetime.now(el_salvador_tz).date()
+                next_day = slip_date_obj + timedelta(days=1)
+                if next_day.date() == today_sv:
+                    next_day_str = next_day.strftime("%Y-%m-%d")
+                    logger.info(
+                        f"[DATE_SHIFT] Original date {slip_date} not found, trying next-day date "
+                        f"{next_day_str} (late-night Transfer365 scenario) for {phone_number}"
+                    )
+                    alt_result = validate_bank_transfer(
+                        slip_date=next_day_str,
+                        slip_amount=payment_data["slip_amount"],
+                        booking_amount=payment_data["booking_amount"]
+                    )
+                    if alt_result.get("success"):
+                        logger.info(
+                            f"[DATE_SHIFT] Transfer found with next-day date {next_day_str} "
+                            f"for {phone_number} — late-night posting confirmed"
+                        )
+                        validation_result = alt_result
+            except (ValueError, TypeError) as e:
+                logger.warning(f"[DATE_SHIFT] Could not attempt next-day date for {phone_number}: {e}")
+
         if not validation_result.get("success"):
             logger.warning(f"Payment validation failed for {phone_number}: {validation_result.get('message')}")
             return False
