@@ -419,6 +419,11 @@
           "intent": "Pool regulations",
           "module": "MODULE_4_INFORMATION.hotel_rooms_facilities.pool"
         },
+        "water_quality_inquiry": {
+          "intent": "Customer asks about water quality in pool, shower, or tap: potable, from the ocean, safe to drink, water source",
+          "module": "MODULE_4_INFORMATION.hotel_rooms_facilities.water",
+          "🚨 ON_REQUEST_ONLY": "NEVER mention proactively"
+        },
         "kitchen_cooking_inquiry": {
           "intent": "Kitchen/cooking in bungalows",
           "module": "MODULE_4_INFORMATION.policies_basic.cooking"
@@ -874,6 +879,9 @@
         },
         "pool_rules_inquiry": {
           "load": "MODULE_4_INFORMATION"
+        },
+        "water_quality_inquiry": {
+          "load": "MODULE_4_INFORMATION.hotel_rooms_facilities"
         },
         "kitchen_cooking_inquiry": {
           "load": "MODULE_4_INFORMATION.policies_basic"
@@ -2656,6 +2664,7 @@
         "hours": "Sun-Thu 8AM-10PM | Fri-Sat 8AM-11PM",
         "dress": "🚨 Swimsuit/lycra ONLY. NO cotton (shirts, jeans, etc.)"
       },
+      "water": "Agua potable (NOT from ocean). Used in pools, showers, and taps. NOT recommended for drinking. Safe for bathing/cleaning. 🚨 ON_REQUEST_ONLY: NEVER mention proactively.",
       "bar_hours": "Sun-Thu 10AM-10PM | Fri-Sat 10AM-11PM",
       "weekend_entertainment": {
         "friday": "Discoteca en bar 🎶",
