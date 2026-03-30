@@ -158,7 +158,7 @@ _QUERY_AUGMENTATION = {
     "hotel_location_access": "dirección ubicación cómo llego dónde queda mapa acceso discapacidad silla de ruedas teléfono contacto",
     "hotel_checkin_policies": "check-in check-out hora entrada salida cancelación política reserva requisitos regulaciones toallas",
     "hotel_restaurant_menu": "restaurante menú comida almuerzo cena desayuno platos opciones buffet servicio habitación mesa romántica",
-    "hotel_rooms_facilities": "piscina wifi internet hamaca bar cama extra pérgola entretenimiento horario piscina dress code alberca agua potable piscina ducha mar océano calidad del agua beber tomar agua agua de la ducha agua del grifo",
+    "hotel_rooms_facilities": "piscina wifi internet hamaca bar cama extra pérgola entretenimiento horario piscina dress code alberca agua potable ducha mar océano calidad del agua beber tomar agua vista al mar vista al océano sin vista al mar jardín palmeras rodeado de naturaleza playa caminando distancia playa desde la habitación qué se ve desde el bungalow tienen vista vistas al mar",
     "parking": "estacionamiento parqueo dónde estaciono costo parking hay parqueo",
     "transportation": "cómo llego transporte bus ruta indicaciones dirección mapa",
     "pasadia_5x4_promotion": "5x4 promoción cinco por cuatro pasadía grupo 5 adultos gratis descuento grupo grande fórmula",

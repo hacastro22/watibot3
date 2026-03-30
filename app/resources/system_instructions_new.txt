@@ -467,6 +467,10 @@
           "intent": "Amenities (general)",
           "module": "MODULE_4_INFORMATION.facilities"
         },
+        "room_view_surroundings_inquiry": {
+          "intent": "Customer asks about room/bungalow views, ocean view, sea view, surroundings, gardens, beach proximity from rooms",
+          "module": "MODULE_4_INFORMATION.hotel_rooms_facilities.surroundings"
+        },
         "english_language_detected": {
           "intent": "Writing in English",
           "action": "Respond in English → ask preference if first interaction",
@@ -898,6 +902,9 @@
         "lost_item_inquiry": {
           "load": "MODULE_4_INFORMATION"
         },
+        "room_view_surroundings_inquiry": {
+          "load": "MODULE_4_INFORMATION.hotel_rooms_facilities"
+        },
         "entertainment_inquiry": {
           "load": "MODULE_4_INFORMATION"
         },
@@ -1076,13 +1083,13 @@
         "rule": "ONLY affirm EXPLICITLY documented info. Undocumented → 'le recomiendo llamar al 2505-2800'",
         "forbidden": [
           "Undocumented locations",
-          "Room views",
           "Exact distances",
           "Unmentioned features"
         ],
         "allowed": [
           "Planta baja (no stairs)",
-          "Accessibility for mobility-reduced"
+          "Accessibility for mobility-reduced",
+          "No ocean/sea view. All rooms/bungalows surrounded by gardens and palm trees. Beach walking distance via restaurant and beach club"
         ],
         "tool_verify": "🚨 NEVER claim action done without tool success. Fail → RETRY. 2nd fail → inform + 2505-2800"
       },
@@ -2666,6 +2673,7 @@
         "dress": "🚨 Swimsuit/lycra ONLY. NO cotton (shirts, jeans, etc.)"
       },
       "water": "Agua potable (NOT from ocean). Used in pools, showers, and taps. NOT recommended for drinking. Safe for bathing/cleaning. Hot water available in showers of all rooms and bungalows. 🚨 ON_REQUEST_ONLY: NEVER mention proactively.",
+      "surroundings": "NO ocean/sea view rooms or bungalows. All surrounded by tropical gardens and palm trees. Beach is walking distance — accessible via restaurant and beach club area.",
       "bar_hours": "Sun-Thu 10AM-10PM | Fri-Sat 10AM-11PM",
       "weekend_entertainment": {
         "friday": "Discoteca en bar 🎶",
