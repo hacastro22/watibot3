@@ -242,7 +242,8 @@ async def start_bank_transfer_retry_process(phone_number: str, payment_data: Dic
         "max_attempts_stage_2": 4, 
         "max_attempts_stage_3": 6,
         "escalated": False,
-        "customer_frustrated": False
+        "customer_frustrated": False,
+        "start_after": payment_data.get("start_after"),  # UTC ISO datetime; None = start immediately
     }
     
     _save_retry_state(retry_state)
@@ -273,6 +274,29 @@ async def _execute_retry_process(phone_number: str) -> None:
     This runs in a continuous loop and handles all retry attempts.
     """
     try:
+        # Delayed start for UNI transfers: wait until the bank is expected to process the transfer
+        retry_state = _load_retry_state()
+        customer_state = retry_state.get(phone_number, {})
+        start_after_str = customer_state.get("start_after")
+        if start_after_str:
+            try:
+                from pytz import utc as _utc
+                start_after_dt = datetime.fromisoformat(start_after_str)
+                if start_after_dt.tzinfo is None:
+                    start_after_dt = _utc.localize(start_after_dt)
+                now_utc = datetime.now(_utc)
+                wait_seconds = (start_after_dt - now_utc).total_seconds()
+                if wait_seconds > 0:
+                    logger.info(
+                        f"[UNI_DELAY] {phone_number}: UNI transfer detected. "
+                        f"Waiting {wait_seconds / 3600:.1f}h until {start_after_str} (SV 9:00 AM) "
+                        f"before first BAC retry."
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    logger.info(f"[UNI_DELAY] {phone_number}: Wait complete, starting retries now.")
+            except Exception as e:
+                logger.warning(f"[UNI_DELAY] Could not parse start_after '{start_after_str}': {e}")
+
         while True:
             retry_state = _load_retry_state()
             customer_state = retry_state.get(phone_number)

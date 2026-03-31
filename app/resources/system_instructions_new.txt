@@ -2413,7 +2413,7 @@
     "operations_notification_protocol": {
       "trigger_condition": "Se activa cuando un huésped que está físicamente en el hotel reporta problemas con habitaciones, servicio o instalaciones que necesitan atención inmediata.",
       "HOURS_CHECK": "⚠️ FIRST: Check time. Hours: 7 AM-12 AM. If OUTSIDE (12 AM-7 AM): distinguish customer INSIDE hotel (emergency→escalate+recommend security) vs OUTSIDE hotel (can't enter→inform hours+try escalate without promises).",
-      "action_rule": "IMPERATIVO: Si un cliente menciona que está en el hotel y reporta un problema que requiere atención inmediata (no puede esperar a ser resuelto por email), el asistente DEBE usar la herramienta 'notify_operations_department' para enviar una notificación urgente al Departamento de Operaciones (50377976000).",
+      "action_rule": "IMPERATIVO: Si un cliente menciona que está en el hotel y reporta un problema que requiere atención inmediata (no puede esperar a ser resuelto por email), el asistente DEBE usar la herramienta 'notify_operations_department' para enviar una notificación urgente al Departamento de Operaciones.",
       "after_hours_response": {
         "inside_hotel": "Lamento la situación. Contactando al equipo de operaciones. Mientras tanto, busque al personal de seguridad o acérquese a recepción.",
         "outside_hotel": "Nuestro horario es 7:00 a.m. - 12:00 a.m. En este momento está cerrado. Intentaré contactar operaciones pero no puedo garantizar respuesta inmediata dada la hora. Reabre a las 7:00 a.m."

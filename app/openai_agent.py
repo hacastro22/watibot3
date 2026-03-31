@@ -340,6 +340,7 @@ YOU ARE ABSOLUTELY FORBIDDEN TO:
 - 🚨 CRITICAL: NEVER say 'no tengo acceso al sistema de tarifas', 'no tengo acceso directo', or 'llame a 2505-2800 para cotizar'. YOU HAVE the get_price_for_date tool - USE IT.
 - 🚨 CRITICAL: NEVER say 'no tengo habilitado el envío del enlace', 'por este medio no puedo enviar enlace', 'llame al 2505-2800 para pago', or ANY variation that deflects payment/booking to phone calls. YOU HAVE create_compraclick_link to generate payment links - USE IT.
 - 🚨 CRITICAL: NEVER tell customers to call ANY phone number for quotes, payments, or bookings. You have ALL the tools needed to complete these tasks.
+- 🚨 CRITICAL: NEVER share internal/operational numbers (like the Operations Department number) as a customer contact. The ONLY public contact number is 2505-2800. If a customer asks for a contact number, give 2505-2800 — NEVER give any other number.
 
 🚨🚨🚨 LODGING AVAILABILITY GATE - ABSOLUTE REQUIREMENT 🚨🚨🚨
 For ANY lodging/hospedaje/estadía quote, you MUST call check_room_availability or check_smart_availability BEFORE:
@@ -1202,7 +1203,7 @@ tools = [
     {
         "type": "function",
         "name": "notify_operations_department",
-        "description": "Send urgent notification to Operations Department (50377976000) when guests at the hotel report issues with rooms, service, or facilities that need immediate attention. Use this ONLY when guests are physically present at the hotel and need immediate assistance that cannot wait for email resolution. IMPORTANT: Extract ALL information from conversation context - do NOT re-ask for details already provided by the guest.",
+        "description": "Send urgent notification to the Operations Department when guests at the hotel report issues with rooms, service, or facilities that need immediate attention. Use this ONLY when guests are physically present at the hotel and need immediate assistance that cannot wait for email resolution. IMPORTANT: Extract ALL information from conversation context - do NOT re-ask for details already provided by the guest.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1997,7 +1998,7 @@ async def get_openai_response(
         "🚨 CRITICAL: make_booking for bank transfers REQUIRES transfer_id from validate_bank_transfer result. Without it, booking is BLOCKED.\n"
         "QUOTE CHAIN: get_price_for_date → present quote → ask to proceed. Complete in same response.\n"
         "</workflow_chains>\n\n"
-        
+
         # GPT-5.2 VERIFICATION - OpenAI recommends verify before execute
         "<verification_rules>\n"
         "Before claiming a payment was found/not found → verify you called the validation tool.\n"
@@ -2216,7 +2217,8 @@ async def get_openai_response(
                 reset_message_count(user_identifier)
                 current_message_count = increment_message_count(user_identifier)
                 should_send_developer = True
-                logger.info(f"[THREAD_ROTATION] Proactive rotation complete → new conv: {new_conv_id}")
+                developer_message = developer_base_modules  # re-assign: was set to None before rotation check
+                logger.info(f"[THREAD_ROTATION] Proactive rotation complete → new conv: {new_conv_id}, developer=FORCE_SENT")
             else:
                 logger.warning(
                     f"[THREAD_ROTATION] Proactive rotation failed for {user_identifier}, "

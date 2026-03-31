@@ -14,6 +14,7 @@ import logging
 import base64
 import aiohttp
 import tempfile
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List, Any, Tuple
 from openai import AsyncOpenAI
 from PyPDF2 import PdfReader
@@ -249,6 +250,130 @@ async def convert_pdf_to_images(pdf_content: bytes) -> List[Dict[str, str]]:
     return image_data
 
 
+def _compute_uni_timing_info() -> dict:
+    """
+    Computes UNI transfer timing information based on current El Salvador time (GMT-6).
+
+    Determines if the transfer was made outside UNI processing hours (Mon-Fri 9AM-5PM)
+    and calculates when it will be reflected in the banking system.
+
+    Returns:
+        dict with:
+        - is_outside_business_hours: bool
+        - available_from: str (Spanish-formatted date/time)
+        - start_after_iso: str (UTC ISO datetime when retries should begin; None if within hours)
+        - customer_message: str (pre-written Spanish message; empty if within hours)
+    """
+    try:
+        from pytz import timezone
+        el_salvador_tz = timezone("America/El_Salvador")
+        now_sv = datetime.now(el_salvador_tz)
+    except Exception:
+        from datetime import timezone as _tz
+        now_sv = datetime.now(_tz(timedelta(hours=-6)))
+
+    # El Salvador fixed public holidays (MM-DD format)
+    # Note: Variable holidays (Jueves/Viernes Santo) are not included
+    SV_FIXED_HOLIDAYS = {
+        "01-01",  # Año Nuevo
+        "05-01",  # Día del Trabajo
+        "08-03",  # Fiestas Agostinas
+        "08-04",  # Fiestas Agostinas
+        "08-05",  # Fiestas Agostinas
+        "08-06",  # Día del Salvador del Mundo
+        "09-15",  # Día de la Independencia
+        "11-02",  # Día de los Difuntos
+        "12-25",  # Navidad
+    }
+
+    SPANISH_DAYS = [
+        "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"
+    ]
+    SPANISH_MONTHS = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+    ]
+
+    def _is_sv_holiday(d: date) -> bool:
+        return d.strftime("%m-%d") in SV_FIXED_HOLIDAYS
+
+    def _is_business_day(d: date) -> bool:
+        return d.weekday() < 5 and not _is_sv_holiday(d)
+
+    def _next_business_day(from_date: date) -> date:
+        next_day = from_date + timedelta(days=1)
+        while not _is_business_day(next_day):
+            next_day += timedelta(days=1)
+        return next_day
+
+    def _format_date_es(d: date) -> str:
+        return (
+            f"{SPANISH_DAYS[d.weekday()]} {d.day} de "
+            f"{SPANISH_MONTHS[d.month - 1]} de {d.year}"
+        )
+
+    current_hour = now_sv.hour
+    today = now_sv.date()
+    today_is_bday = _is_business_day(today)
+
+    # UNI processes Mon-Fri 9:00 AM - 5:00 PM El Salvador time
+    within_uni_hours = today_is_bday and 9 <= current_hour < 17
+    is_outside = not within_uni_hours
+
+    # Determine when the transfer will be available and compute start_after in UTC
+    from pytz import timezone as _tz, utc as _utc
+    _sv_tz = _tz("America/El_Salvador")
+
+    if within_uni_hours:
+        available_from_str = f"hoy ({_format_date_es(today)}) durante el horario bancario"
+        start_after_iso = None  # Start retrying immediately
+    elif today_is_bday and current_hour < 9:
+        # Before UNI opens: will process today starting at 9 AM
+        available_from_str = f"hoy ({_format_date_es(today)}) a partir de las 9:00 AM"
+        _start_sv = _sv_tz.localize(datetime(today.year, today.month, today.day, 9, 0, 0))
+        start_after_iso = _start_sv.astimezone(_utc).isoformat()
+    else:
+        # Past 5 PM, weekend, or holiday: next business day at 9 AM
+        next_bday = _next_business_day(today)
+        available_from_str = f"{_format_date_es(next_bday)} a partir de las 9:00 AM"
+        _start_sv = _sv_tz.localize(datetime(next_bday.year, next_bday.month, next_bday.day, 9, 0, 0))
+        start_after_iso = _start_sv.astimezone(_utc).isoformat()
+
+    customer_message = ""
+    if is_outside:
+        customer_message = (
+            f"He revisado su comprobante y veo que realizó una **Transferencia UNI** 🏦\n\n"
+            f"⚠️ Las Transferencias UNI tienen un horario limitado de procesamiento: "
+            f"**lunes a viernes de 9:00 AM a 5:00 PM** (hora El Salvador).\n\n"
+            f"Como su transferencia fue realizada fuera de este horario, el banco la procesará "
+            f"el **{available_from_str}**.\n\n"
+            f"✅ **No necesita hacer nada más.** Nuestro sistema verificará automáticamente "
+            f"su transferencia en cuanto el banco la procese y le confirmaremos su reserva "
+            f"de inmediato.\n\n"
+            f"Si en el futuro desea una transferencia inmediata (disponible 24/7), le recomendamos "
+            f"usar **Transferencia 365** desde su aplicación bancaria. 🙏"
+        )
+
+    assistant_instruction = ""
+    if is_outside:
+        assistant_instruction = (
+            "🚨 TRANSFERENCIA UNI OUTSIDE HOURS: "
+            "DO NOT call sync_bank_transfers or validate_bank_transfer (transfer not in BAC system yet). "
+            "Send the EXACT text from uni_timing.customer_message to the customer. "
+            "Then call start_bank_transfer_retry_process with the extracted slip_date, slip_amount, booking_amount, "
+            "AND include start_after=uni_timing.start_after_iso in payment_data (this delays retries until the bank opens). "
+            "No further actions needed this turn."
+        )
+
+    return {
+        "is_outside_business_hours": is_outside,
+        "available_from": available_from_str,
+        "start_after_iso": start_after_iso,
+        "customer_message": customer_message,
+        "assistant_instruction": assistant_instruction,
+    }
+
+
 async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, Any]:
     """
     Analyzes images with OpenAI o4-mini to extract payment information.
@@ -308,11 +433,13 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                 4. Reference number (if available)
                 5. Confirmation that transfer was to account 200252070
                 6. Recipient account type (CRITICAL - look for "cuenta corriente", "cuenta de ahorro", "corriente", or "ahorro" to determine if transfer was sent to correct account type)
+                7. Transfer method (CRITICAL - look for text 'Transferencias UNI', 'Transferencia UNI', or 'UNI' in the title or body, which indicates an inter-bank transfer with limited processing hours. Look for 'Transferencia 365' or '365' for a 24/7 real-time transfer. Set transfer_method to 'UNI', '365', or 'unknown')
                 
                 Return only a JSON response with the following structure. The 'chain_of_thought' is for internal analysis; DO NOT expose it to the end user:
                 {
                     "is_valid_receipt": boolean,
                     "receipt_type": "compraclick" or "bank_transfer" or "unknown",
+                    "transfer_method": "UNI" or "365" or "unknown" (for bank_transfer type only; detect from title text like 'Transferencias UNI' or 'Transferencia 365'; use "unknown" for compraclick or if not determinable),
                     "chain_of_thought": {
                         "steps": [
                             {"step": 1, "action": "Image quality check", "reasoning": "Ensure image is readable", "result": "Clear/Blurry"},
@@ -453,6 +580,17 @@ async def analyze_with_o4_mini(image_data: List[Dict[str, str]]) -> Dict[str, An
                     account_type_validation["is_correct_account_type"] = None  # Unknown account type
                 
                 parsed_result["account_type_validation"] = account_type_validation
+
+            # Check for UNI transfer and compute timing info
+            if parsed_result.get("receipt_type") == "bank_transfer":
+                transfer_method = parsed_result.get("transfer_method", "unknown")
+                if transfer_method == "UNI":
+                    parsed_result["uni_timing"] = _compute_uni_timing_info()
+                    logger.info(
+                        f"[PAYMENT_PROOF] UNI transfer detected. "
+                        f"is_outside_business_hours={parsed_result['uni_timing']['is_outside_business_hours']}, "
+                        f"available_from={parsed_result['uni_timing']['available_from']}"
+                    )
 
             return parsed_result
 
