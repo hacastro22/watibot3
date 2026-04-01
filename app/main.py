@@ -843,7 +843,7 @@ def startup_event():
         logger.warning(f"[STARTUP] Cleaned up {stale_count} stale processing locks")
     
     # Clean up old buffered messages (older than 5 minutes)
-    # These are from previous service runs where timers were killed mid-flight
+    # 5 min covers the max processing window: ~125s for any media message, ~65s for text-only
     logger.info("[STARTUP] Cleaning up old buffered messages...")
     cleaned_count = message_buffer.cleanup_old_buffered_messages(max_age_minutes=5)
     if cleaned_count > 0:
@@ -863,10 +863,21 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
         buffer_window = int(time_elapsed) + 5  # Add 5 second safety buffer
         logger.info(f"[BUFFER] Timer for {wa_id} started at {timer_start_time}, using buffer window of {buffer_window}s")
     else:
-        # Fallback to old logic
-        buffer_window = 75  # 65 + 10 safety buffer
+        # Fallback
+        buffer_window = 135  # was 75; covers ~125s extension window + safety margin
         logger.info(f"[BUFFER] No timer start time for {wa_id}, using fallback buffer window of {buffer_window}s")
-    
+
+    # Media batch extension: extend once if any media message detected in this batch window
+    count = message_buffer.count_media_buffered_messages(wa_id, since_seconds=buffer_window)
+    if count >= 1:
+        logger.info(f"[BUFFER] {count} media message(s) for {wa_id}, extending buffer by 60s")
+        threading.Event().wait(60)
+        # Recalculate to cover the extra 60s
+        if timer_start_time:
+            time_elapsed = (datetime.utcnow() - timer_start_time).total_seconds()
+            buffer_window = int(time_elapsed) + 5
+        # else: fallback 135 already covers ~120s extension
+
     # Gather all messages buffered in the calculated window
     buffered_messages = message_buffer.get_and_clear_buffered_messages(wa_id, since_seconds=buffer_window)
     if not buffered_messages:
@@ -1224,8 +1235,19 @@ def manychat_timer_callback(conversation_id: str, channel: str, user_id: str, ti
         buffer_window = int(time_elapsed) + 5  # Add 5 second safety buffer
         logging.info(f"[MC_BUFFER] Timer for {conversation_id} started at {timer_start_time}, using buffer window of {buffer_window}s")
     else:
-        buffer_window = 75  # Fallback
+        buffer_window = 135  # was 75; covers ~120s extension window + safety margin
         logging.info(f"[MC_BUFFER] No timer start time for {conversation_id}, using fallback buffer window of {buffer_window}s")
+
+    # Media batch extension: extend once if any media message detected in this batch window
+    count = message_buffer.count_media_buffered_messages(conversation_id, since_seconds=buffer_window)
+    if count >= 1:
+        logging.info(f"[MC_BUFFER] {count} media message(s) for {conversation_id}, extending buffer by 60s")
+        threading.Event().wait(60)
+        # Recalculate to cover the extra 60s
+        if timer_start_time:
+            time_elapsed = (datetime.utcnow() - timer_start_time).total_seconds()
+            buffer_window = int(time_elapsed) + 5
+        # else: fallback 135 already covers ~120s extension
 
     buffered_messages = message_buffer.get_and_clear_buffered_messages(conversation_id, since_seconds=buffer_window)
     if not buffered_messages:

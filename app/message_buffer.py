@@ -182,6 +182,26 @@ def has_buffered_messages(wa_id: str) -> bool:
         count = cursor.fetchone()[0]
         return count > 0
 
+def count_media_buffered_messages(wa_id: str, since_seconds: int) -> int:
+    """Count image/audio/document messages for wa_id within the last since_seconds (no delete).
+
+    Covers all media types across channels:
+    - WATI images, photos, documents -> stored as 'image' (webhook normalises)
+    - WATI audio/voice               -> stored as 'audio'
+    - ManyChat images                -> stored as 'image'
+    - ManyChat audio                 -> stored as 'audio'
+    - ManyChat file attachments      -> stored as 'document' (FB Messenger type: 'file')
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=since_seconds)
+    cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM message_buffer "
+            "WHERE wa_id = ? AND message_type IN ('image', 'audio', 'document') AND timestamp >= ?",
+            (wa_id, cutoff_str)
+        )
+        return cursor.fetchone()[0]
+
 def get_all_wa_ids_with_buffered_messages() -> list:
     """Get all wa_ids that currently have messages in the buffer.
     
@@ -294,8 +314,8 @@ def cleanup_old_buffered_messages(max_age_minutes: int = 5):
     This prevents accumulation of stale messages from service restarts
     where timers were killed mid-flight.
     
-    Default 5 minutes = messages that would have been processed by timer (65s) 
-    plus some safety margin for slow processing.
+    Default 5 minutes covers max processing window: ~125s for any media message,
+    ~65s for text-only, plus safety margin for slow processing.
     """
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
