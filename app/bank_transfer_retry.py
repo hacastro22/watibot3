@@ -454,47 +454,71 @@ async def _attempt_validation_and_booking(phone_number: str, payment_data: Dict[
             logger.warning(f"Payment validation failed for {phone_number}: {validation_result.get('message')}")
             return False
             
-        # Import booking function to complete the booking
-        from .booking_tool import make_booking
-        
-        # Complete the booking - FORCE PROCESS to bypass time validation in retry mechanism
+        # Import booking functions to complete the booking
+        from .booking_tool import make_booking, make_multi_room_booking
+
         booking_data = payment_data["booking_data"]
-        booking_result = await make_booking(
-            customer_name=booking_data["customer_name"],
-            email=booking_data["email"],
-            phone_number=phone_number,
-            city=booking_data["city"],
-            dui_passport=booking_data["dui_passport"],
-            nationality=booking_data["nationality"],
-            check_in_date=booking_data["check_in_date"],
-            check_out_date=booking_data["check_out_date"],
-            adults=booking_data["adults"],
-            children_0_5=booking_data["children_0_5"],
-            children_6_10=booking_data["children_6_10"],
-            bungalow_type=booking_data["bungalow_type"],
-            package_type=booking_data["package_type"],
-            payment_method="Depósito BAC",
-            payment_amount=payment_data["slip_amount"],
-            payment_maker_name=booking_data["customer_name"],
-            wa_id=phone_number,  # Added missing wa_id parameter
-            transfer_id=validation_result["transfer_id"],
-            force_process=True,  # BYPASS time validation in retry mechanism
-            extra_beds=booking_data.get("extra_beds", 0),
-            extra_beds_cost=booking_data.get("extra_beds_cost", 0.0),
-            customer_instructions=booking_data.get("customer_instructions", None)
-        )
-        
+        room_bookings = booking_data.get("room_bookings")
+
+        if room_bookings and len(room_bookings) > 1:
+            # Multi-room booking path
+            logger.info(f"[MULTI_ROOM_RETRY] Using make_multi_room_booking for {phone_number} ({len(room_bookings)} rooms)")
+            booking_result = await make_multi_room_booking(
+                customer_name=booking_data["customer_name"],
+                email=booking_data["email"],
+                phone_number=phone_number,
+                city=booking_data["city"],
+                dui_passport=booking_data["dui_passport"],
+                nationality=booking_data["nationality"],
+                check_in_date=booking_data["check_in_date"],
+                check_out_date=booking_data["check_out_date"],
+                room_bookings=room_bookings,
+                package_type=booking_data["package_type"],
+                payment_method="Depósito BAC",
+                payment_amount=payment_data["slip_amount"],
+                payment_maker_name=booking_data["customer_name"],
+                wa_id=phone_number,
+                transfer_id=validation_result["transfer_id"],
+                extra_beds=booking_data.get("extra_beds", 0),
+                extra_beds_cost=booking_data.get("extra_beds_cost", 0.0),
+                customer_instructions=booking_data.get("customer_instructions", None)
+            )
+        else:
+            # Single-room booking path - FORCE PROCESS to bypass time validation in retry mechanism
+            booking_result = await make_booking(
+                customer_name=booking_data["customer_name"],
+                email=booking_data["email"],
+                phone_number=phone_number,
+                city=booking_data["city"],
+                dui_passport=booking_data["dui_passport"],
+                nationality=booking_data["nationality"],
+                check_in_date=booking_data["check_in_date"],
+                check_out_date=booking_data["check_out_date"],
+                adults=booking_data["adults"],
+                children_0_5=booking_data["children_0_5"],
+                children_6_10=booking_data["children_6_10"],
+                bungalow_type=booking_data["bungalow_type"],
+                package_type=booking_data["package_type"],
+                payment_method="Depósito BAC",
+                payment_amount=payment_data["slip_amount"],
+                payment_maker_name=booking_data["customer_name"],
+                wa_id=phone_number,
+                transfer_id=validation_result["transfer_id"],
+                force_process=True,  # BYPASS time validation in retry mechanism
+                extra_beds=booking_data.get("extra_beds", 0),
+                extra_beds_cost=booking_data.get("extra_beds_cost", 0.0),
+                customer_instructions=booking_data.get("customer_instructions", None)
+            )
+
         if booking_result.get("success"):
-            # Send success message to customer
-            success_message = f"""¡Excelente! Su pago ha sido validado y su reserva ha sido confirmada exitosamente. 🎉
-
-Código de reserva: {booking_result.get('reserva', 'N/A')}
-
-Los detalles de su reserva han sido enviados a su correo electrónico. Si tiene alguna pregunta o necesita asistencia adicional, no dude en contactarnos por este medio o llamándonos al 2505-2800.
-
-¡Gracias por confiar en nosotros y por elegirnos para pasar momentos de calidad con su familia y amigos! Su confianza es muy importante para nosotros.
-
-¡Esperamos verle pronto en Las Hojas Resort! 🌴"""
+            # Use customer_message from make_multi_room_booking if available, else build default
+            success_message = booking_result.get("customer_message") or (
+                f"¡Excelente! Su pago ha sido validado y su reserva ha sido confirmada exitosamente. 🎉\n\n"
+                f"Código de reserva: {booking_result.get('reserva', 'N/A')}\n\n"
+                f"Los detalles de su reserva han sido enviados a su correo electrónico. Si tiene alguna pregunta o necesita asistencia adicional, no dude en contactarnos por este medio o llamándonos al 2505-2800.\n\n"
+                f"¡Gracias por confiar en nosotros y por elegirnos para pasar momentos de calidad con su familia y amigos! Su confianza es muy importante para nosotros.\n\n"
+                f"¡Esperamos verle pronto en Las Hojas Resort! 🌴"
+            )
             await send_wati_message(phone_number, success_message)
             logger.info(f"Booking completed successfully for {phone_number}: {booking_result.get('reserva')}")
             return True

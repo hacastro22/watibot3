@@ -1131,7 +1131,20 @@ tools = [
                                 "package_type": {"type": "string"},
                                 "extra_beds": {"type": "integer", "description": "Number of extra beds requested (0 if none)"},
                                 "extra_beds_cost": {"type": "number", "description": "Total cost for extra beds (0.0 if free or none)"},
-                                "customer_instructions": {"type": "string", "description": "Special instructions from customer in Spanish (optional)"}
+                                "customer_instructions": {"type": "string", "description": "Special instructions from customer in Spanish (optional)"},
+                                "room_bookings": {
+                                    "type": "array",
+                                    "description": "For multi-room bookings: array of room configurations, each with bungalow_type, adults, children_0_5, children_6_10. If present, make_multi_room_booking will be used instead of make_booking.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "bungalow_type": {"type": "string"},
+                                            "adults": {"type": "integer"},
+                                            "children_0_5": {"type": "integer"},
+                                            "children_6_10": {"type": "integer"}
+                                        }
+                                    }
+                                }
                             }
                         }
                     },
@@ -1193,7 +1206,20 @@ tools = [
                         "package_type": {"type": "string"},
                         "extra_beds": {"type": "integer", "description": "Number of extra beds requested (0 if none)"},
                         "extra_beds_cost": {"type": "number", "description": "Total cost for extra beds (0.0 if free or none)"},
-                        "customer_instructions": {"type": "string", "description": "Special instructions from customer in Spanish (optional)"}
+                        "customer_instructions": {"type": "string", "description": "Special instructions from customer in Spanish (optional)"},
+                        "room_bookings": {
+                            "type": "array",
+                            "description": "For multi-room bookings: array of room configurations, each with bungalow_type, adults, children_0_5, children_6_10. If present, make_multi_room_booking will be used instead of make_booking.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "bungalow_type": {"type": "string"},
+                                    "adults": {"type": "integer"},
+                                    "children_0_5": {"type": "integer"},
+                                    "children_6_10": {"type": "integer"}
+                                }
+                            }
+                        }
                     }
                 }
             },
