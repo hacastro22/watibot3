@@ -1096,6 +1096,17 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
                         logger.info(f"[MISSED_MESSAGES_CHECK] No missed messages found for {wa_id}")
                 else:
                     logger.info(f"[MISSED_MESSAGES_CHECK] Less than 5 minutes since previous message for {wa_id}")
+
+                # If more than 1 hour, reset agent_context_injected so get_openai_response
+                # re-injects a fresh history snapshot from the WATI API.  This ensures
+                # any human-agent conversations that happened during the long gap are
+                # captured before the model replies.
+                if time_diff > 3600:
+                    try:
+                        thread_store.reset_agent_context_injected(wa_id)
+                        logger.info(f"[AGENT_CONTEXT_REFRESH] Reset agent_context_injected for {wa_id} after {time_diff:.0f}s gap — fresh history will be injected")
+                    except Exception as e:
+                        logger.warning(f"[AGENT_CONTEXT_REFRESH] Failed to reset agent context flag for {wa_id}: {e}")
             except Exception as e:
                 logger.exception(f"[MISSED_MESSAGES_CHECK] Error checking missed messages for {wa_id}: {e}")
                 time_diff = None  # Reset on error
@@ -1221,10 +1232,15 @@ def timer_callback(wa_id, timer_start_time=None, previous_webhook_timestamp=None
             message_buffer.release_processing_lock(wa_id)
 
 
-def manychat_timer_callback(conversation_id: str, channel: str, user_id: str, timer_start_time=None):
+def manychat_timer_callback(conversation_id: str, channel: str, user_id: str, timer_start_time=None,
+                            previous_webhook_timestamp=None, previous_last_updated=None):
     """Aggregates buffered ManyChat messages and sends AI response via appropriate adapter.
 
     conversation_id is formatted as "{channel}:{user_id}" to avoid collisions with WATI keys.
+    previous_webhook_timestamp: last_webhook_timestamp captured BEFORE updating it in the webhook
+                                handler; used for missed-message detection and context refresh.
+    previous_last_updated:      last_updated captured BEFORE the webhook update; used as the
+                                cutoff for missed-message queries.
     """
     # Wait 60 seconds to gather messages similar to WATI behavior
     threading.Event().wait(60)
@@ -1295,6 +1311,38 @@ def manychat_timer_callback(conversation_id: str, channel: str, user_id: str, ti
 
     prompt = "\n".join(lines)
     logging.info(f"[MC_BUFFER] Sending combined prompt for {conversation_id}: {prompt!r}")
+
+    # --- Gap-detection: missed messages + context refresh (mirrors WATI timer_callback) ---
+    mc_time_diff = None
+    if previous_webhook_timestamp:
+        try:
+            last_wh_time = datetime.strptime(previous_webhook_timestamp, '%Y-%m-%d %H:%M:%S')
+            mc_time_diff = (datetime.utcnow() - last_wh_time).total_seconds()
+            logging.info(f"[MC_MISSED_MESSAGES_CHECK] {conversation_id}: Previous webhook at {previous_webhook_timestamp}, time_diff={mc_time_diff:.1f}s")
+
+            if mc_time_diff > 300:
+                from agent_context_injector import get_missed_customer_agent_messages_for_developer_input
+                missed_messages_prompt = get_missed_customer_agent_messages_for_developer_input(
+                    conversation_id, previous_last_updated, exclude_texts=lines
+                )
+                if missed_messages_prompt:
+                    logging.info(f"[MC_MISSED_MESSAGES_CHECK] Found {len(missed_messages_prompt)} chars of missed messages for {conversation_id}")
+                    prompt = missed_messages_prompt + "\n\n" + prompt
+                else:
+                    logging.info(f"[MC_MISSED_MESSAGES_CHECK] No missed messages found for {conversation_id}")
+            else:
+                logging.info(f"[MC_MISSED_MESSAGES_CHECK] Less than 5 minutes since previous message for {conversation_id}")
+
+            if mc_time_diff > 3600:
+                try:
+                    thread_store.reset_agent_context_injected(conversation_id)
+                    logging.info(f"[MC_AGENT_CONTEXT_REFRESH] Reset agent_context_injected for {conversation_id} after {mc_time_diff:.0f}s gap — fresh history will be injected")
+                except Exception as e:
+                    logging.warning(f"[MC_AGENT_CONTEXT_REFRESH] Failed to reset agent context flag for {conversation_id}: {e}")
+        except Exception as e:
+            logging.exception(f"[MC_MISSED_MESSAGES_CHECK] Error checking missed messages for {conversation_id}: {e}")
+    else:
+        logging.info(f"[MC_MISSED_MESSAGES_CHECK] No previous webhook timestamp for {conversation_id} (first message)")
 
     try:
         # Maintain independent threads per conversation_id
@@ -1441,7 +1489,11 @@ async def manychat_webhook(request: Request):
         content = unified_msg.media_url or ''
         caption = unified_msg.content if unified_msg.content else None
     message_buffer.buffer_message(conversation_id, msg_type, content, caption)
-    
+
+    # CRITICAL: Capture old timestamps BEFORE updating so the timer can compute the gap
+    old_mc_webhook_timestamp = thread_store.get_last_webhook_timestamp(conversation_id)
+    old_mc_last_updated = thread_store.get_last_updated_timestamp(conversation_id)
+
     # Track webhook message timestamp for missed message detection
     thread_store.update_last_webhook_timestamp(conversation_id)
 
@@ -1450,7 +1502,11 @@ async def manychat_webhook(request: Request):
     with mc_timer_lock:
         if conversation_id not in mc_timers:
             timer_start_time = now
-            t = threading.Thread(target=manychat_timer_callback, args=(conversation_id, unified_msg.channel, unified_msg.user_id, timer_start_time))
+            t = threading.Thread(
+                target=manychat_timer_callback,
+                args=(conversation_id, unified_msg.channel, unified_msg.user_id, timer_start_time,
+                      old_mc_webhook_timestamp, old_mc_last_updated)
+            )
             t.daemon = True
             mc_timers[conversation_id] = t
             t.start()

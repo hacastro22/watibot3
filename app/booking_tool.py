@@ -923,6 +923,8 @@ async def make_multi_room_booking(
         reserverooms = "+".join(str(r) for r in selected_rooms)
         adult_counts = [str(r["adults"]) for r in room_details]
         adultcount = "+".join(adult_counts)
+        childcount = "+".join(str(r["children_0_5"]) for r in room_details)
+        childcount1 = "+".join(str(r["children_6_10"]) for r in room_details)
         total_children_0_5 = sum(r["children_0_5"] for r in room_details)
         total_children_6_10 = sum(r["children_6_10"] for r in room_details)
         
@@ -950,8 +952,8 @@ async def make_multi_room_booking(
             check_out_date=check_out_date,
             reserverooms=reserverooms,
             adultcount=adultcount,
-            children_0_5=total_children_0_5,
-            children_6_10=total_children_6_10,
+            childcount=childcount,
+            childcount1=childcount1,
             bungalow_type=primary_bungalow_type,
             package_type=package_type,
             payment_method=payment_method,
@@ -2698,8 +2700,8 @@ async def _make_multi_room_api_call(
     check_out_date: str,
     reserverooms: str,
     adultcount: str,
-    children_0_5: int,
-    children_6_10: int,
+    childcount: str,
+    childcount1: str,
     bungalow_type: str,
     package_type: str,
     payment_method: str,
@@ -2816,8 +2818,8 @@ async def _make_multi_room_api_call(
         "checkOut": check_out_formatted,
         "acomodacion": acomodacion_desc,
         "adultcount": adultcount,
-        "childcount": str(children_0_5),
-        "childcount1": str(children_6_10),
+        "childcount": childcount,
+        "childcount1": childcount1,
         "payway": payway,
         "loadamount": f"{payment_amount:.2f}",
         "email": email,

@@ -1841,7 +1841,7 @@ async def rotate_conversation_thread(old_conversation_id: str, wa_id: str, curre
             
             # Get the old thread data before deleting (wa_id is PRIMARY KEY)
             cursor.execute(
-                "SELECT wa_id, thread_id, created_at, agent_context_injected FROM threads WHERE wa_id = ?", 
+                "SELECT wa_id, thread_id, created_at, agent_context_injected, last_webhook_timestamp FROM threads WHERE wa_id = ?", 
                 (wa_id,)
             )
             old_thread_data = cursor.fetchone()
@@ -1861,10 +1861,12 @@ async def rotate_conversation_thread(old_conversation_id: str, wa_id: str, curre
                 )
                 logger.info(f"[THREAD_ROTATION] Archived old conversation {old_thread_data[1]} for {wa_id}")
             
-            # Insert new conversation record (without agent_context_injected flag)
+            # Insert new conversation record, preserving last_webhook_timestamp so the
+            # missed-messages gap check (time_diff > 300s) works correctly after rotation.
+            old_webhook_ts = old_thread_data[4] if (old_thread_data and len(old_thread_data) > 4) else None
             cursor.execute(
-                "INSERT INTO threads (wa_id, thread_id, created_at) VALUES (?, ?, ?)",
-                (wa_id, new_conversation_id, datetime.now().isoformat())
+                "INSERT INTO threads (wa_id, thread_id, created_at, last_webhook_timestamp) VALUES (?, ?, ?, ?)",
+                (wa_id, new_conversation_id, datetime.now().isoformat(), old_webhook_ts)
             )
             
             conn.commit()
@@ -2237,6 +2239,7 @@ async def get_openai_response(
             )
             if new_conv_id:
                 conversation_id = new_conv_id
+                save_conversation_id(user_identifier, new_conv_id)
                 save_response_id(user_identifier, None)
                 previous_response_id = None
                 from .thread_store import reset_message_count
@@ -2386,6 +2389,7 @@ async def get_openai_response(
                     # Responses API uses previous_response_id for continuation, not conversation_id
                     # Save agent context response ID for chaining
                     save_response_id(user_identifier, agent_response.id)
+                    mark_agent_context_injected(user_identifier)
                     logger.info(f"[AGENT_CONTEXT] Agent context injected, response_id={agent_response.id}")
                     
                     logger.info(f"[MSG_STRATEGY] Fresh recovery with context at message {current_message_count}: sending system + developer")
@@ -2641,7 +2645,8 @@ async def get_openai_response(
                     from .thread_store import reset_message_count, clear_loaded_modules
                     from agent_context_injector import (
                         get_agent_context_for_system_injection,
-                        get_manychat_context_for_system_injection
+                        get_manychat_context_for_system_injection,
+                        mark_agent_context_injected
                     )
                     reset_message_count(user_identifier)
                     clear_loaded_modules(user_identifier)
@@ -2672,6 +2677,7 @@ async def get_openai_response(
                             max_output_tokens=16
                         )
                         save_response_id(user_identifier, agent_response.id)
+                        mark_agent_context_injected(conversation_id)
                         logger.info(f"[AGENT_CONTEXT] Agent context injected for fresh recovery conversation {conversation_id}")
                         
                         logger.info(f"[MSG_STRATEGY] Tool error recovery with context at message {current_message_count}: sending system + developer")

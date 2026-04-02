@@ -60,6 +60,10 @@ def init_db():
             # Add loaded_modules to track loaded modules (JSON string)
             conn.execute("ALTER TABLE threads ADD COLUMN loaded_modules TEXT DEFAULT NULL")
         except sqlite3.OperationalError: pass
+        try:
+            # Add agent_context_injected to track one-time history injection per conversation
+            conn.execute("ALTER TABLE threads ADD COLUMN agent_context_injected INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
 
         # --- Data Backfill for Migrated Rows ---
         # Set default values for rows that existed before the migration.
@@ -105,12 +109,22 @@ def delete_old_threads(hours: int = 24):
 def save_conversation_id(identifier: str, conversation_id: str):
     """
     Saves conversation_id for Responses API migration.
-    If conversation_id is None, deletes the record to clear corrupted state.
+    If conversation_id is None, clears only the OpenAI conversation fields
+    (conversation_id, last_response_id) while preserving last_webhook_timestamp
+    and agent_context_injected so that gap-detection and history-refresh logic
+    continue to work correctly after a corrupted-state recovery.
     """
     with get_conn() as conn:
         if conversation_id is None:
-            # Clear corrupted conversation state by deleting the record
-            conn.execute("DELETE FROM threads WHERE wa_id = ?", (identifier,))
+            # Clear only conversational state — do NOT delete the row, which would
+            # wipe last_webhook_timestamp and break the missed-messages / context-refresh checks.
+            conn.execute(
+                """UPDATE threads
+                   SET conversation_id = NULL,
+                       last_response_id = NULL
+                   WHERE wa_id = ?""",
+                (identifier,)
+            )
         else:
             conn.execute("""
                 INSERT INTO threads (wa_id, thread_id, conversation_id, created_at, last_updated, history_imported)
@@ -211,6 +225,22 @@ def reset_message_count(identifier: str):
     """Resets message count to 0 (used after thread rotation)."""
     with get_conn() as conn:
         conn.execute("""UPDATE threads SET message_count = 0 WHERE wa_id = ?""", (identifier,))
+        conn.commit()
+
+def reset_agent_context_injected(wa_id: str):
+    """Clears the agent_context_injected flag so the next request re-injects fresh history.
+
+    Called when a significant time gap is detected (e.g. >1 hour since the last
+    customer message), indicating that human agents may have had a conversation
+    after the last history snapshot was taken.  Clearing this flag causes
+    get_openai_response to fetch the current WATI message history and inject it
+    as a developer message, ensuring the model has up-to-date context.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE threads SET agent_context_injected = 0 WHERE wa_id = ?",
+            (wa_id,)
+        )
         conn.commit()
 
 def save_loaded_modules(identifier: str, modules: list, message_num: int):
