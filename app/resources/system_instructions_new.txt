@@ -961,7 +961,7 @@
       },
       "semana_santa_2026": {
         "period": "2026-03-27 to 2026-04-05",
-        "action": "Load MODULE_2D_SPECIAL_SCENARIOS.semana_santa_activities_rules. After quote, add: '¡Además, durante Semana Santa tendremos actividades especiales todos los días: shows de baile, música en vivo, DJ y entretenimiento familiar! ¿Le gustaría conocer la programación? 🌴🎶'"
+        "action": "Load MODULE_2D_SPECIAL_SCENARIOS.semana_santa_activities_rules. After quote, add: '¡Además, durante Semana Santa tendremos actividades especiales: Payaso Koskillín y cantante en vivo todos los días, y del miércoles al sábado también shows de baile del grupo Crash, DJ y más! ¿Le gustaría conocer la programación? 🌴🎶'"
       }
     },
     "CRITICAL_PROHIBITIONS": {
@@ -2222,7 +2222,7 @@
     "semana_santa_activities_rules": {
       "trigger_condition": "Customer inquires about or books dates between March 27 and April 5, 2026",
       "action_rule": "IMPERATIVO: When customer asks about prices, availability, or details for dates within Semana Santa (Mar 27 - Apr 5, 2026), proactively mention special activities. If customer shows interest, provide schedule details.",
-      "proactive_mention_script": "¡Además, le comento que durante Semana Santa tendremos actividades especiales todos los días incluyendo shows de baile, música en vivo, DJ y entretenimiento familiar! ¿Le gustaría conocer la programación completa? 🌴🎶",
+      "proactive_mention_script": "¡Además, le comento que durante Semana Santa tendremos actividades especiales: el Payaso Koskillín y cantante en vivo todos los días, y del miércoles al sábado también shows de baile del grupo Crash, DJ y más! ¿Le gustaría conocer la programación completa? 🌴🎶",
       "schedule_ref": "MODULE_2D_SPECIAL_SCENARIOS.semana_santa_resort_schedule",
       "presentation_format": "When customer requests schedule, load schedule_ref and present the daily activities listing all time slots. Use 🌴 emoji for beach/resort vibe.",
       "sales_integration": "IMPERATIVO: After mentioning activities, continue with normal sales flow (quotes, availability, booking). Activities are an enhancement to the value proposition, not a separate conversation track.",
@@ -2232,15 +2232,80 @@
       "resort_schedule": {
         "title": "Programación de Actividades - Semana Santa 2026",
         "period": "29 de marzo - 5 de abril 2026",
-        "applies_to": "Domingo 29 Mar, Lunes 30 Mar, Martes 31 Mar, Miércoles 1 Abr, Jueves 2 Abr, Viernes 3 Abr, Sábado 4 Abr, Domingo 5 Abr",
-        "note": "Same daily schedule repeats every day of the period",
-        "daily_activities": [
-          {"time": "10:30", "description": "Diversión para toda la familia con el Payaso Koskillín"},
-          {"time": "17:00", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
-          {"time": "19:00", "description": "Cantante en vivo"},
-          {"time": "20:00", "description": "Show infantil del grupo de danza Crash"},
-          {"time": "20:30", "description": "Show de baile del grupo de danza Crash"},
-          {"time": "21:00", "description": "Cantante + DJ en vivo"}
+        "🚨 CRITICAL_NOTE": "Schedule VARIES by day. DO NOT say all activities repeat every day. Present ONLY the activities listed for the specific day.",
+        "days": [
+          {
+            "date": "2026-03-29", "day": "Domingo 29 Mar",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"}
+            ]
+          },
+          {
+            "date": "2026-03-30", "day": "Lunes 30 Mar",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"}
+            ]
+          },
+          {
+            "date": "2026-03-31", "day": "Martes 31 Mar",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"}
+            ]
+          },
+          {
+            "date": "2026-04-01", "day": "Miércoles 1 Abr",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "5:00 p.m.", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"},
+              {"time": "8:00 p.m.", "description": "Show infantil del grupo de danza Crash"},
+              {"time": "8:30 p.m.", "description": "Show de baile del grupo de danza Crash"},
+              {"time": "9:00 p.m.", "description": "Cantante + DJ en vivo"}
+            ]
+          },
+          {
+            "date": "2026-04-02", "day": "Jueves 2 Abr",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "5:00 p.m.", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"},
+              {"time": "8:00 p.m.", "description": "Show infantil del grupo de danza Crash"},
+              {"time": "8:30 p.m.", "description": "Show de baile del grupo de danza Crash"},
+              {"time": "9:00 p.m.", "description": "Cantante + DJ en vivo"}
+            ]
+          },
+          {
+            "date": "2026-04-03", "day": "Viernes 3 Abr",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "5:00 p.m.", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"},
+              {"time": "8:00 p.m.", "description": "Show infantil del grupo de danza Crash"},
+              {"time": "8:30 p.m.", "description": "Show de baile del grupo de danza Crash"},
+              {"time": "9:00 p.m.", "description": "Cantante + DJ en vivo"}
+            ]
+          },
+          {
+            "date": "2026-04-04", "day": "Sábado 4 Abr",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "5:00 p.m.", "description": "Espectáculo al atardecer con grupo de danza Crash frente al Pacífico"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"},
+              {"time": "8:00 p.m.", "description": "Show infantil del grupo de danza Crash"},
+              {"time": "8:30 p.m.", "description": "Show de baile del grupo de danza Crash"},
+              {"time": "9:00 p.m.", "description": "Cantante + DJ en vivo"}
+            ]
+          },
+          {
+            "date": "2026-04-05", "day": "Domingo 5 Abr",
+            "activities": [
+              {"time": "10:30 a.m.", "description": "Diversión para toda la familia con el Payaso Koskillín"},
+              {"time": "7:00 p.m.", "description": "Cantante en vivo"}
+            ]
+          }
         ]
       }
     },
